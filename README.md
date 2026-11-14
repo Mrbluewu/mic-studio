@@ -26,6 +26,22 @@ dist/          安装包产物（不入库）
 
 各目录的存放规则见 [docs/DIRECTORY.md](docs/DIRECTORY.md)。
 
+## 前置条件
+
+| 依赖 | 要求 |
+|---|---|
+| 编译器 | Visual Studio 2022 BuildTools（MSVC，C++20） |
+| 构建工具 | CMake 3.20+ |
+| 打包（可选） | Inno Setup 6 |
+| VST3 SDK | **需自行放置**到 `third_party/vst3sdk/`，见下 |
+
+VST3 SDK 不入库，克隆后必须补齐，否则 `vst3_host` 模块无法编译：
+
+1. 获取 VST3 SDK **3.7.1**（上游 tag `v3.7.1_build_50`）：
+   `git clone --recursive --branch v3.7.1_build_50 https://github.com/steinbergmedia/vst3sdk.git`
+2. 把仓库内容整体放到 `third_party/vst3sdk/`，确认其中存在 `CMakeLists.txt`、`pluginterfaces/`、`public.sdk/`。
+3. 子模块（`base`、`cmake`、`vstgui4` 等）必须一并检出，不能只拷贝顶层目录。
+
 ## 构建
 
 ```powershell
@@ -80,3 +96,16 @@ $cmake = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7
 | `tools/dump-children.ps1` | 打印全部子控件句柄/类名/文本 |
 
 均需先构建 Release，且运行中的 micstudio.exe 会被脚本结束时关闭。
+
+## 许可证
+
+本项目采用 [GPL-3.0](LICENSE) 发布。
+
+第三方组件声明：
+
+| 组件 | 许可证 | 说明 |
+|---|---|---|
+| DeepFilterNet | 见上游 DualSenseNet / DeepFilterNet 项目许可证 | `third_party/deepfilternet/` 下的预编译 DLL 与运行时文件 |
+| VST3 SDK 3.7.1 | Steinberg VST3 License 或 GPL-3.0（双授权） | 不由本仓库分发，使用时自行放置；本项目按 GPL-3.0 一侧使用 |
+| VST 插件（用户加载） | 各自上游许可证 | 本项目只做宿主加载，不再分发插件本体 |
+

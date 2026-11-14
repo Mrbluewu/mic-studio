@@ -74,7 +74,7 @@
 |---|---|
 | `tests/CMakeLists.txt` | 测试目标定义 |
 | `tests/ui_tests.cpp` | 布局与控件行为测试，含窗口高度基线 |
-| `tests/fixtures/plugins/VST3/` | DeepFilterNet 的 VST3 bundle，作 VST3 托管的手工验证样本；**不入库**，缺失时从 `D:\项目4\mic-studio-fixtures\DeepFilterNet-VST3-0.1.13.zip` 解压到本目录 |
+| `tests/fixtures/plugins/VST3/` | DeepFilterNet 的 VST3 bundle，作 VST3 托管的手工验证样本；**不入库**，需要时自行准备 `DeepFilterNet.vst3` 并整目录放到本路径 |
 
 VST2 托管验证不需要单独夹具：`third_party/deepfilternet/DeepFilterNet.dll` 与 VST2 插件二进制完全一致（MD5
 `F1B3BFDA6BDB8593721378D0C213A545`），直接把 VST2 host 指向该文件即可。此前的
