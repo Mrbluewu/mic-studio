@@ -21,7 +21,7 @@ OutputBaseFilename=MicStudio-Setup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-SetupIconFile=..\packaging\mic-studio.ico
+SetupIconFile=..\assets\icons\mic-studio.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; 按用户安装，无需管理员权限

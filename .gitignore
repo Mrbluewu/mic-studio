@@ -11,7 +11,6 @@ CMakeUserPresets.json
 *.suo
 
 # 测试夹具（VST 二进制，体积大，仅本地保留）
-/test_plugins/
 /tests/fixtures/plugins/
 
 # 第三方目录：vst3sdk / rnnoise 是独立 git 检出，交由各自仓库管理

@@ -1,4 +1,4 @@
-configure_file("${CMAKE_SOURCE_DIR}/packaging/mic-studio.ico"
+configure_file("${CMAKE_SOURCE_DIR}/assets/icons/mic-studio.ico"
   "${CMAKE_CURRENT_BINARY_DIR}/app.ico" COPYONLY)
 configure_file(micstudio.rc.in "${CMAKE_CURRENT_BINARY_DIR}/micstudio.rc" @ONLY)
 
