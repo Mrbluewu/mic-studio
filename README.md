@@ -65,7 +65,7 @@ $cmake = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7
 |---|---|---|
 | `third_party/deepfilternet/` | DeepFilterNet 运行时（DLL），构建与运行必需 | 是 |
 | `third_party/vst3sdk/` | VST3 SDK，独立 git 检出 | 否，需手动放置 |
-| `tests/fixtures/plugins/` | VST2/VST3 测试插件二进制，仅手工验证用 | 否 |
+| `tests/fixtures/plugins/VST3/` | DeepFilterNet 的 VST3 bundle，仅 VST3 手工验证用；VST2 验证直接复用 `third_party/deepfilternet/DeepFilterNet.dll` | 否 |
 
 `third_party/vst3sdk` 与已移除的 `rnnoise` 原本都是独立 git 仓库，因此由 `.gitignore` 排除，避免外层仓库记录无法解析的子模块引用。
 
