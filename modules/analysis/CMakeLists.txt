@@ -1,0 +1,3 @@
+add_library(ms_analysis INTERFACE)
+target_include_directories(ms_analysis INTERFACE include)
+target_link_libraries(ms_analysis INTERFACE ms_flags)

@@ -1,0 +1,22 @@
+# 构建产物
+/build/
+/out/
+/dist/
+
+# IDE / 工具
+/.vs/
+/.vscode/
+CMakeUserPresets.json
+*.user
+*.suo
+
+# 测试夹具（VST 二进制，体积大，仅本地保留）
+/test_plugins/
+/tests/fixtures/plugins/
+
+# 第三方目录：vst3sdk / rnnoise 是独立 git 检出，交由各自仓库管理
+/third_party/vst3sdk/
+/third_party/rnnoise/
+
+# 脚本输出
+/tools/*.png

@@ -1,0 +1,3 @@
+add_library(ms_ring_buffer INTERFACE)
+target_include_directories(ms_ring_buffer INTERFACE include)
+target_link_libraries(ms_ring_buffer INTERFACE ms_flags)
