@@ -64,6 +64,42 @@ int endpoint_position(const std::vector<ms::audio_io::EndpointInfo>& items, int 
   return -1;
 }
 
+// 首次启动没有设备记录时按系统默认端点补齐：麦克风优先通信默认，输出优先控制台默认；
+// 两种角色都没标出来时退到第一台可用设备。excluded_id 用于把虚拟麦克风排除在输入之外。
+int pick_default_endpoint(const std::vector<ms::audio_io::EndpointInfo>& items, bool communications,
+                          const std::wstring& excluded_id) {
+  auto find = [&](bool comm) {
+    for (const auto& item : items) {
+      if (!excluded_id.empty() && item.id == excluded_id) {
+        continue;
+      }
+      if (comm ? item.isDefaultCommunications : item.isDefaultConsole) {
+        return static_cast<int>(item.index);
+      }
+    }
+    return -1;
+  };
+
+  int index = communications ? find(true) : find(false);
+  if (index < 0) {
+    index = communications ? find(false) : find(true);
+  }
+  if (index < 0) {
+    for (const auto& item : items) {
+      if (excluded_id.empty() || item.id != excluded_id) {
+        return static_cast<int>(item.index);
+      }
+    }
+  }
+  return index >= 0 ? index : static_cast<int>(items.front().index);
+}
+
+// 启动阶段的用户可见提示：同时写日志，避免只留一行没人看的记录。
+void show_startup_notice(const std::wstring& text) {
+  log_line(ms::platform::to_utf8(text));
+  ::MessageBoxW(nullptr, text.c_str(), L"Mic Studio", MB_OK | MB_ICONWARNING);
+}
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
@@ -150,42 +186,124 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
   g_inputs = inputs.items;
   g_outputs = outputs.items;
 
-  const int input_index = resolve_endpoint(g_inputs, g_settings.input_id, g_settings.input_name);
-  const int output_index = resolve_endpoint(g_outputs, g_settings.output_id, g_settings.output_name);
-  if (input_index < 0 || output_index < 0) {
-    log_line("设备配置缺失或已失效，请先运行 engine-cli run ... --save 写入配置");
+  // 虚拟麦克风（CABLE Output）：首次启动时用作系统默认录音设备，
+  // 选输入时必须排除它，否则会把虚拟麦克风当真实输入形成回环。
+  std::wstring virtual_mic_id;
+  std::wstring virtual_sink_id;
+  for (const auto& device : g_inputs) {
+    if (device.friendlyName.find(L"CABLE Output") != std::wstring::npos) {
+      virtual_mic_id = device.id;
+      break;
+    }
+  }
+  for (const auto& device : g_outputs) {
+    if (device.friendlyName.find(L"CABLE Input") != std::wstring::npos) {
+      virtual_sink_id = device.id;
+      break;
+    }
+  }
+
+  // 设备配置整体为空 = 真正的首次启动（装完直接打开，没有跑过 engine-cli --save）。
+  const bool fresh_device_config = g_settings.input_id.empty() &&
+                                   g_settings.input_name.empty() &&
+                                   g_settings.output_id.empty() &&
+                                   g_settings.output_name.empty();
+  int input_index = resolve_endpoint(g_inputs, g_settings.input_id, g_settings.input_name);
+  int output_index = resolve_endpoint(g_outputs, g_settings.output_id, g_settings.output_name);
+
+  if (fresh_device_config) {
+    if (g_inputs.empty()) {
+      show_startup_notice(L"未检测到可用的麦克风。请连接麦克风后重新启动。");
+      return 2;
+    }
+    if (g_outputs.empty()) {
+      show_startup_notice(L"未检测到可用的输出设备。请连接播放设备后重新启动。");
+      return 2;
+    }
+    input_index = pick_default_endpoint(g_inputs, true, virtual_mic_id);
+    // 输出优先写虚拟声卡：只有写进 CABLE Input，其他会议软件才能在 CABLE Output 上读到
+    // 降噪后的声音；没装虚拟声卡时再退回系统默认输出，避免首启直接把麦克风播到扬声器。
+    output_index = resolve_endpoint(g_outputs, virtual_sink_id, L"");
+    const bool used_virtual_sink = output_index >= 0;
+    if (!used_virtual_sink) {
+      output_index = pick_default_endpoint(g_outputs, false, L"");
+    }
+    const int input_pos = endpoint_position(g_inputs, input_index);
+    const int output_pos = endpoint_position(g_outputs, output_index);
+    const auto& picked_input = g_inputs[static_cast<std::size_t>(input_pos)];
+    const auto& picked_output = g_outputs[static_cast<std::size_t>(output_pos)];
+    if (!virtual_mic_id.empty() && picked_input.id == virtual_mic_id) {
+      show_startup_notice(L"未检测到可用的真实麦克风（只剩虚拟麦克风）。请连接麦克风后重新启动。");
+      return 2;
+    }
+    g_settings.input_id = picked_input.id;
+    g_settings.input_name = picked_input.friendlyName;
+    g_settings.output_id = picked_output.id;
+    g_settings.output_name = picked_output.friendlyName;
+    log_line("首次启动：麦克风 \"" + ms::platform::to_utf8(picked_input.friendlyName) +
+             "\" → 输出 \"" + ms::platform::to_utf8(picked_output.friendlyName) + "\"" +
+             (used_virtual_sink ? "（虚拟声卡）" : ""));
+    // 没有系统默认设备时明确告知用户实际选用了哪一台，而不是悄悄换设备。
+    // 若默认端点就是虚拟麦克风（上次异常退出留下的），说明默认设置本身存在，
+    // 只是被上面的排除规则跳过，这里只记日志，不弹窗打扰。
+    bool has_default_input = false;
+    for (const auto& device : g_inputs) {
+      if (device.isDefaultCommunications || device.isDefaultConsole) {
+        has_default_input = true;
+        break;
+      }
+    }
+    if (!has_default_input) {
+      show_startup_notice(L"未找到系统默认麦克风，已自动选用「" + picked_input.friendlyName + L"」。");
+    } else if (!picked_input.isDefaultCommunications && !picked_input.isDefaultConsole) {
+      log_line("系统默认录音设备是虚拟麦克风，已改用真实麦克风 \"" +
+               ms::platform::to_utf8(picked_input.friendlyName) + "\"");
+    }
+    if (!used_virtual_sink && !picked_output.isDefaultConsole) {
+      show_startup_notice(L"未找到系统默认输出设备，已自动选用「" +
+                          picked_output.friendlyName + L"」。");
+    }
+  } else if (input_index < 0 || output_index < 0) {
+    show_startup_notice(L"设置里记录的音频设备已不可用。请重新选择麦克风和输出设备后重试。");
     return 2;
   }
+
   g_input_endpoint = endpoint_position(g_inputs, input_index);
   g_output_endpoint = endpoint_position(g_outputs, output_index);
   if (g_input_endpoint < 0 || g_output_endpoint < 0) {
-    log_line("设备配置缺失或已失效，请先运行 engine-cli run ... --save 写入配置");
+    show_startup_notice(L"音频设备定位失败，请重新选择设备后重试。");
     return 2;
   }
 
   const auto& input = g_inputs[static_cast<std::size_t>(g_input_endpoint)];
   const auto& sink = g_outputs[static_cast<std::size_t>(g_output_endpoint)];
 
-  // 虚拟麦克风：优先用设置里记录的 id
+  // 虚拟麦克风：优先用设置里记录的 id，没有再按名字找 CABLE Output。
   int mic_index = resolve_endpoint(g_inputs, g_settings.mic_id, g_settings.mic_name);
-  if (mic_index < 0) {
-    for (const auto& device : g_inputs) {
-      if (device.friendlyName.find(L"CABLE Output") != std::wstring::npos) {
-        mic_index = static_cast<int>(device.index);
-        break;
-      }
-    }
+  if (mic_index < 0 && !virtual_mic_id.empty()) {
+    mic_index = resolve_endpoint(g_inputs, virtual_mic_id, L"");
   }
   // mic_index 是端点自身的 index，不等于它在 g_inputs 中的位置：枚举跳过坏端点时两者会错位。
   const int mic_position = endpoint_position(g_inputs, mic_index);
-  if (mic_position < 0) {
-    log_line("找不到虚拟麦克风端点");
-    return 2;
+  const ms::audio_io::EndpointInfo* mic =
+      mic_position >= 0 ? &g_inputs[static_cast<std::size_t>(mic_position)] : nullptr;
+  if (mic == nullptr) {
+    if (!fresh_device_config) {
+      show_startup_notice(L"未找到虚拟麦克风（CABLE Output）。请安装 VB-Audio Virtual Cable 后重试。");
+      return 2;
+    }
+    // 首次启动没有虚拟麦克风也继续：降噪链路可用，只是不自动切换系统默认录音设备。
+    log_line("首次启动：未找到虚拟麦克风（CABLE Output），本次不切换系统默认录音设备");
+  } else if (fresh_device_config) {
+    g_settings.mic_id = mic->id;
+    g_settings.mic_name = mic->friendlyName;
   }
-  const auto& mic = g_inputs[static_cast<std::size_t>(mic_position)];
+  if (fresh_device_config) {
+    g_settings.save();
+  }
 
   // 异常退出自检：默认设备若还停在虚拟麦克风上，先切回真实麦克风
-  if (ms::platform::current_default_capture() == mic.id) {
+  if (mic != nullptr && ms::platform::current_default_capture() == mic->id) {
     ms::platform::restore_default_capture(input.id);
     log_line("检测到上次异常退出留下的默认设备，已切回真实麦克风");
   }
@@ -230,8 +348,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
              ms::platform::to_utf8(g_engine.builtin_denoise_error()) + "）");
   }
 
-  if (g_settings.set_default_mic) {
-    g_previous_default = ms::platform::set_default_capture(mic.id);
+  if (g_settings.set_default_mic && mic != nullptr) {
+    g_previous_default = ms::platform::set_default_capture(mic->id);
     g_default_switched = !g_previous_default.empty();
   }
 
@@ -263,6 +381,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     g_engine.stop();
     return 4;
   }
+  // CreateWindowExW 的宽高是含标题栏/边框的外框尺寸，而布局按客户区 300px 宽绘制。
+  // 首次启动若不做这一步，客户区只有 284px 宽，卡片右沿会被窗口边缘裁掉；
+  // 高度也会停在硬编码的 520 外框，折叠态 448 不生效，页脚与底边留白错位。
+  // 这里走与展开/收起相同的布局路径，把客户区定成 300 × 折叠态高度。
+  apply_layout(true);
   ui::apply_dwm(g_window);
 
   g_icon.cbSize = sizeof(g_icon);
