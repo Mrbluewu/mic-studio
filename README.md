@@ -84,6 +84,8 @@ ISS 脚本由模板 `packaging/installer.iss.in` 在 CMake 配置阶段生成到
 
 输出：`dist\MicStudio-Setup-<版本>.exe`
 
+安装向导默认简体中文（语言文件在 `packaging/languages/ChineseSimplified.isl`），英文保留为可选。安装目录只含 `micstudio.exe`、`DeepFilterNet.dll`、`LICENSE`、`THIRD-PARTY-NOTICES.txt`（后两者同时用于向导的许可协议页与第三方声明页）；`README.md` 与 `engine-cli.exe` 不随包分发。
+
 MSVC 运行库为静态链接（`MultiThreaded`），产物不依赖 `vc_redist`，可直接分发。
 
 ## 版本号

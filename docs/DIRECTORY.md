@@ -67,8 +67,11 @@
 | 路径 | 内容 |
 |---|---|
 | `packaging/installer.iss.in` | Inno Setup 脚本模板：安装目录、快捷方式、卸载项、LicenseFile；`{#AppVersion}` 由 CMake 注入 |
+| `packaging/languages/ChineseSimplified.isl` | 安装向导简体中文语言文件（向导默认语言，英文保留为可选）；Inno Setup 自带语言包里没有中文，必须随仓库提供 |
 
 模板在 CMake 配置阶段生成到 `build/packaging/installer.iss`，故模板内的相对路径以 `build/packaging/` 为基准（用 `..\..\` 回到仓库根）。修改打包配置请改 `.in` 模板，不要改生成物。
+
+安装包随附两个声明文件：`LICENSE`（GPL-3.0 全文，作为 `LicenseFile`）与 `THIRD-PARTY-NOTICES.txt`（第三方组件声明，作为 `InfoBeforeFile` 单独成页）。`README.md` 只面向开发者，不随安装包分发。
 
 ## tests/
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(mic_studio VERSION 0.1.15 LANGUAGES C CXX)
+project(mic_studio VERSION 0.1.16 LANGUAGES C CXX)
 
 # VST3 SDK 体积大且需要手动放置到 third_party/vst3sdk，默认开启但允许关闭，
 # 以便干净克隆的环境（如 CI 首次构建）能先跑通主链路。

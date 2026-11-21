@@ -18,6 +18,10 @@ VersionInfoProductName={#AppName}
 VersionInfoDescription={#AppName} Setup
 ; GPL-3.0 要求分发二进制时附带许可证全文，并在安装向导里可见。
 LicenseFile=..\..\LICENSE
+; 第三方组件声明（含 DeepFilterNet 的 MIT 许可证原文）单独成页展示：
+; Inno Setup 一条 LicenseFile 只能指一个文件，用 InfoBeforeFile 让声明在
+; 「许可协议」之后、选择目录之前单独出现，避免声明随 README 一起消失。
+InfoBeforeFile=..\..\THIRD-PARTY-NOTICES.txt
 DefaultDirName={localappdata}\Programs\Mic Studio
 DefaultGroupName={#AppName}
 ; 显示「选择安装位置」页，允许用户自定义目录
@@ -37,16 +41,25 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\micstudio.exe
 
+[Languages]
+; 简体中文放第一位即默认选中；英文保留为可选，多语言时向导会先让用户选语言。
+; Inno Setup 安装目录里没有中文语言包，这份 isl 取自 Inno Setup 6 的社区简体中文翻译
+; （https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation），随仓库提供以保证构建可复现。
+Name: "chinesesimp"; MessagesFile: "..\..\packaging\languages\ChineseSimplified.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"
 
 [Files]
 Source: "..\..\build\apps\micstudio\Release\micstudio.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\..\build\apps\engine-cli\Release\engine-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
+; engine-cli.exe 只是开发期的命令行工具（列设备/压测/导出对比），主程序运行时不依赖它，
+; 已从安装包移除，仍保留在构建产物里供开发使用。
 Source: "..\..\build\apps\micstudio\Release\DeepFilterNet.dll"; DestDir: "{app}"; Flags: ignoreversion
 ; 随包附 GPL-3.0 全文，满足分发二进制时的许可证随附义务。
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+; 第三方组件声明（含 DeepFilterNet 的 MIT 许可证原文）随包分发，README 不再进安装目录。
+Source: "..\..\THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\micstudio.exe"
