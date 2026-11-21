@@ -1,0 +1,43 @@
+# clang-tidy 规则集：只开「真能发现问题且不需要大改」的检查。
+# 目标是新代码不再引入已知缺陷类型，而不是一次性清洗历史代码。
+# 用法：clang-tidy -p build <file>；仅警告，不参与构建门禁。
+
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  modernize-use-override,
+  modernize-use-nullptr,
+  modernize-use-using,
+  modernize-use-emplace,
+  modernize-make-unique,
+  modernize-make-shared,
+  readability-braces-around-statements,
+  readability-const-return-type,
+  readability-container-size-empty,
+  readability-redundant-string-cstr,
+  readability-uppercase-literal-suffix,
+  readability-misleading-indentation,
+  cppcoreguidelines-pro-type-static-cast-downcast,
+  cppcoreguidelines-init-variables,
+
+WarningsAsErrors: ''
+
+# 已知不适用本项目的检查：音频实时路径大量裸指针与 reinterpret_cast，
+# 第三方头文件也不受本项目控制。
+CheckOptions:
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-braces-around-statements.ShortStatementLines
+    value: '2'
+  - key: cppcoreguidelines-init-variables.MathHdrs
+    value: 'true'
+  - key: performance-move-const-arg.CheckTriviallyCopyableMove
+    value: 'false'
+
+HeaderFilterRegex: '(modules|apps|tests)/.*\.(h|hpp)$'
+
+# 第三方与生成目录一律不检查
+ExcludeHeaderFilterRegex: 'third_party/.*'
+
+FormatStyle: file

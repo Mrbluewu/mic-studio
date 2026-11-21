@@ -1,5 +1,6 @@
 add_library(ms_audio_io STATIC
   src/device_enumerator.cpp
+  src/wasapi_session.cpp
   src/capture_stream.cpp
   src/render_stream.cpp
   src/endpoint_meter.cpp

@@ -1,10 +1,10 @@
 #pragma once
 
+#include "dsp_core/bounded_parameter_queue.h"
 #include "dsp_core/processor.h"
 #include "platform/error.h"
 
 #include <cstdint>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -71,7 +71,6 @@ class Vst2Slot : public dsp_core::IProcessor {
 
   void* module_ = nullptr;
   AEffect* effect_ = nullptr;
-  int num_inputs_ = 0;
   int num_outputs_ = 0;
   int latency_frames_ = 0;
   double sample_rate_ = 48000.0;
@@ -81,8 +80,7 @@ class Vst2Slot : public dsp_core::IProcessor {
   int editor_width_ = 0;
   int editor_height_ = 0;
 
-  std::mutex change_mutex_;
-  std::vector<ParameterChange> pending_changes_;
+  ms::dsp_core::BoundedParameterQueue<ParameterChange, 2048> pending_changes_;
 
   // 每声道内部缓冲，长度等于插件块长；只在 load 时分配一次。
   std::vector<float> in_l_;

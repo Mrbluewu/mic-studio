@@ -125,8 +125,7 @@ void LevelerEffect::process(float* data, int frames) {
 void LevelerEffect::reset() { gain_ = 1.0f; }
 
 void DeEsserEffect::prepare(const dsp_core::ProcessContext& context) {
-  // 5 kHz 分频：低通保留主体，高通单独处理齿音
-  low_pass_.configure(Biquad::Type::Peaking, context.sampleRate, 6000.0f, -24.0f, 1.4f);
+  // 用 7 kHz 提升把齿音频段抽出来单独压限；主体 = 原信号 - 高频段。
   high_pass_.configure(Biquad::Type::Peaking, context.sampleRate, 7000.0f, 6.0f, 1.2f);
   attack_coeff_ = static_cast<float>(1.0 - std::exp(-1.0 / (0.002 * context.sampleRate)));
   release_coeff_ = static_cast<float>(1.0 - std::exp(-1.0 / (0.08 * context.sampleRate)));
@@ -154,7 +153,6 @@ void DeEsserEffect::process(float* data, int frames) {
 }
 
 void DeEsserEffect::reset() {
-  low_pass_.reset();
   high_pass_.reset();
   envelope_ = 0.0f;
 }

@@ -1,0 +1,40 @@
+# EditorConfig：跨编辑器的基础格式约定。
+# 与 .clang-format 分工：本文件管「编码、换行、行尾空白」等编辑器层规则，
+# .clang-format 管 C++ 的具体排版。两者不重叠。
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# C/C++ 与 CMake
+[*.{c,cc,cpp,cxx,h,hpp,hxx,inl}]
+indent_size = 2
+
+[CMakeLists.txt]
+indent_size = 2
+
+[*.cmake]
+indent_size = 2
+
+# Markdown：行尾双空格有语义（换行），不裁剪
+[*.md]
+trim_trailing_whitespace = false
+
+# Inno Setup 脚本
+[*.iss]
+indent_size = 2
+
+# Windows 批处理保持 CRLF
+[*.{bat,cmd,ps1}]
+end_of_line = crlf
+
+# 二进制资源不做任何文本处理
+[*.{ico,png,dll,lib,exe}]
+insert_final_newline = false
+trim_trailing_whitespace = false

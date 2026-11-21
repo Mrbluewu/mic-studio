@@ -1,6 +1,7 @@
 #include "vst3_host/vst3_slot.h"
 
 #include "platform/utf8.h"
+#include "dsp_core/bounded_parameter_queue.h"
 #include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
@@ -17,7 +18,6 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -35,9 +35,7 @@ class HostComponentHandler final : public IComponentHandler {
  public:
   tresult PLUGIN_API beginEdit(ParamID) SMTG_OVERRIDE { return kResultOk; }
   tresult PLUGIN_API performEdit(ParamID id, ParamValue value) SMTG_OVERRIDE {
-    std::lock_guard<std::mutex> lock(mutex_);
-    pending_.push_back(
-        {static_cast<int>(id), static_cast<float>(std::clamp(value, 0.0, 1.0))});
+    pending_.try_push({static_cast<int>(id), static_cast<float>(std::clamp(value, 0.0, 1.0))});
     return kResultOk;
   }
   tresult PLUGIN_API endEdit(ParamID) SMTG_OVERRIDE { return kResultOk; }
@@ -47,15 +45,12 @@ class HostComponentHandler final : public IComponentHandler {
   }
 
   std::vector<Vst3Slot::ParameterChange> take_changes() {
-    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<Vst3Slot::ParameterChange> result;
-    result.swap(pending_);
+    Vst3Slot::ParameterChange change;
+    while (pending_.try_pop(change)) {
+      result.push_back(change);
+    }
     return result;
-  }
-
-  void clear_changes() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    pending_.clear();
   }
 
   tresult PLUGIN_API queryInterface(const TUID _iid, void** obj) SMTG_OVERRIDE {
@@ -68,8 +63,7 @@ class HostComponentHandler final : public IComponentHandler {
   uint32 PLUGIN_API release() SMTG_OVERRIDE { return 1; }
 
  private:
-  std::mutex mutex_;
-  std::vector<Vst3Slot::ParameterChange> pending_;
+  ms::dsp_core::BoundedParameterQueue<Vst3Slot::ParameterChange, 2048> pending_;
 };
 
 // 最小 IPlugFrame：响应插件发起的窗口尺寸变化。
@@ -131,7 +125,7 @@ struct Vst3Slot::Impl {
   int input_channels = 0;
   int output_channels = 0;
 
-  ParameterChangeTransfer pending_params{64};
+  ms::dsp_core::BoundedParameterQueue<Vst3Slot::ParameterChange, 2048> pending_params;
   ParameterChanges in_changes{64};
   ParameterChanges out_changes{64};
   ProcessContext context{};
@@ -145,7 +139,6 @@ struct Vst3Slot::Impl {
 };
 
 void Vst3Slot::Impl::unload() {
-  handler.clear_changes();
   // 先摘掉编辑器，避免父窗口销毁后插件仍引用视图。
   if (view != nullptr) {
     view->setFrame(nullptr);
@@ -381,7 +374,18 @@ void Vst3Slot::process(float* data, int frames) {
     return;
   }
 
-  state.pending_params.transferChangesTo(state.in_changes);
+  Vst3Slot::ParameterChange change;
+  for (std::size_t count = 0; count < state.pending_params.capacity() &&
+                              state.pending_params.try_pop(change); ++count) {
+    int32 queue_index = 0;
+    auto* queue = state.in_changes.addParameterData(static_cast<ParamID>(change.id), queue_index);
+    if (queue != nullptr) {
+      int32 point_index = 0;
+      // 单个参数点写入失败（该参数队列在单块内写满）只丢弃这一个点，
+      // 不能 clearQueue，否则本块已排队的其它参数会被一并清掉。
+      queue->addPoint(0, static_cast<ParamValue>(change.value), point_index);
+    }
+  }
 
   int offset = 0;
   while (offset < frames) {
@@ -475,14 +479,10 @@ std::vector<Vst3Slot::ParameterInfo> Vst3Slot::parameters() const {
 
 void Vst3Slot::set_parameter(int id, float value) {
   Impl& state = *impl_;
-  if (state.processor == nullptr || id < 0) {
+  if (id < 0) {
     return;
   }
-  const float normalized = std::clamp(value, 0.0f, 1.0f);
-  if (state.controller != nullptr) {
-    state.controller->setParamNormalized(static_cast<ParamID>(id), normalized);
-  }
-  state.pending_params.addChange(static_cast<ParamID>(id), normalized, 0);
+  state.pending_params.try_push({id, std::clamp(value, 0.0f, 1.0f)});
 }
 
 std::vector<Vst3Slot::ParameterChange> Vst3Slot::take_parameter_changes() {

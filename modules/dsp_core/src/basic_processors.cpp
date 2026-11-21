@@ -64,7 +64,10 @@ void Limiter::prepare(const ProcessContext& context) {
 void Limiter::process(float* data, int frames) {
   const float ceiling = db_to_linear(ceiling_db_.load());
   for (int i = 0; i < frames; ++i) {
-    const float magnitude = std::fabs(data[i]);
+    // 插件可能输出 NaN/Inf。非有限值必须先归一为 0：Inf 会让 required 变成 0，
+    // 随后 inf * 0 得到 NaN 并永久污染输出流。
+    const float sample = std::isfinite(data[i]) ? data[i] : 0.0f;
+    const float magnitude = std::fabs(sample);
     const float required = magnitude > ceiling ? ceiling / magnitude : 1.0f;
 
     if (required < envelope_) {
@@ -72,7 +75,7 @@ void Limiter::process(float* data, int frames) {
     } else {
       envelope_ += (required - envelope_) * release_coeff_;
     }
-    data[i] *= envelope_;
+    data[i] = sample * envelope_;
   }
 }
 

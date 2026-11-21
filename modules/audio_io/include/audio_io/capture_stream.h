@@ -40,14 +40,18 @@ class CaptureStream {
   // 停止并等待线程退出，随后停止底层流。可重复调用。
   void stop();
 
+  // 停止并释放端点（设备归还系统）。之后可再次 open。
+  void close();
+
   const AudioFormat& format() const noexcept;
+  // 开流后引擎实际使用的周期（帧）；未打开时为 0。
+  std::uint32_t period_frames() const noexcept;
   bool running() const noexcept;
   Stats stats() const noexcept;
 
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
-  bool loopback_ = false;
 };
 
 }  // namespace ms::audio_io

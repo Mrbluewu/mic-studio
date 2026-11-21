@@ -71,7 +71,6 @@ class DeEsserEffect : public dsp_core::IProcessor {
   void set_enabled(bool enabled) noexcept { enabled_.store(enabled); }
 
  private:
-  Biquad low_pass_;
   Biquad high_pass_;
   float envelope_ = 0.0f;
   float attack_coeff_ = 0.01f;

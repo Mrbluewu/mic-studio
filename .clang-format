@@ -1,0 +1,55 @@
+# clang-format 配置：以 Google 风格为基底，按本项目实际代码微调。
+# 目标是「格式化后 diff 尽量小」，因此缩进、换行、指针风格都贴合现有代码。
+# 用法：clang-format -i <file>；CI 用 clang-format --dry-run --Werror 校验。
+
+Language: Cpp
+BasedOnStyle: Google
+
+# 缩进与行宽
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+ColumnLimit: 110
+
+# 大括号：函数与类均换行（与现有代码一致）
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# 指针与引用：int* p 风格
+PointerAlignment: Left
+ReferenceAlignment: Pointer
+DerivePointerAlignment: false
+
+# 访问说明符：public: 前缩进 1 个空格
+AccessModifierOffset: -1
+
+# 构造初始化列表
+BreakConstructorInitializers: BeforeColon
+ConstructorInitializerIndentWidth: 4
+PackConstructorInitializers: Never
+
+# 参数与实参：超长时逐行对齐
+BinPackArguments: false
+BinPackParameters: false
+AlignAfterOpenBracket: Align
+
+# 命名空间内容不额外缩进
+NamespaceIndentation: None
+
+# include 排序：按块分组，保留原有分组顺序
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve
+
+# 空行
+MaxEmptyLinesToKeep: 1
+KeepEmptyLinesAtTheStartOfBlocks: false
+
+# 注释
+ReflowComments: true
+SpacesBeforeTrailingComments: 2
+
+# 模板与宏不做重新格式化（避免破坏宏拼装代码）
+StatementMacros:
+  - Q_UNUSED

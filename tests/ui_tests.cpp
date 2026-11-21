@@ -232,9 +232,7 @@ void test_layout_geometry() {
   begin("layout: geometry");
 
   // 固定 300px 窄窗：所有元素左右边距 14px，内容宽 272px。
-  const std::size_t no_rows[3] = {0, 0, 0};
-  const bool no_notes[3] = {false, false, false};
-  ui::Layout l = ui::compute_layout(no_rows, no_notes, true);
+  ui::Layout l = ui::compute_layout(true);
   constexpr int kLeft = 14;
   constexpr int kRight = 286;
 
@@ -256,42 +254,51 @@ void test_layout_geometry() {
 
   // 主开关水平居中，圆直径 104px，命中区域只有圆形本身。
   CHECK(approx((l.power.left + l.power.right) / 2, kLeft + (kRight - kLeft) / 2));
-  CHECK(l.power.bottom - l.power.top == 232);
   CHECK(l.power_button.right - l.power_button.left == 104);
   CHECK(l.power_button.bottom - l.power_button.top == 104);
   CHECK(approx((l.power_button.left + l.power_button.right) / 2,
                (l.power.left + l.power.right) / 2));
-  CHECK(approx((l.power_button.top + l.power_button.bottom) / 2,
-               (l.power.top + l.power.bottom) / 2));
+  // 圆形按钮上方的留白压到原来的 1/3：标题下沿到圆顶 25px。
+  CHECK(l.power_button.top - l.header.bottom == 25);
+  CHECK(l.power_button.bottom <= l.device_input.top);
+  // 下方留白同步收紧：圆底到首行文字 4px，两行文字下沿到设备行 23px。
+  CHECK(l.power.bottom == l.power_button.bottom + 4 + 40);
+  CHECK(l.device_input.top - l.power.bottom == 23);
 
   // 强度标签在左、数值右对齐。
   CHECK(l.denoise_label.left == kLeft);
   CHECK(l.denoise_value.right == kRight);
   CHECK(l.denoise_label.right < l.denoise_value.left);
 
-  // 折叠态：页脚紧跟高级入口，整窗高 500px。
-  ui::Layout collapsed = ui::compute_layout(no_rows, no_notes, false);
+  // 折叠态：页脚紧跟高级入口，整窗高 448px。
+  ui::Layout collapsed = ui::compute_layout(false);
   CHECK(collapsed.footer.top == collapsed.advanced_toggle.bottom + 6);
-  CHECK(collapsed.client_height == 502);
+  CHECK(collapsed.client_height == 448);
   CHECK(collapsed.footer.bottom + 14 == collapsed.client_height);
   CHECK(collapsed.client_height < l.client_height);
 
-  // 高级区自上而下：场景 → 插件 → 参数 → 声音处理 → 对比 → 底噪条 → 常规。
+  // 高级区自上而下：场景 → 插件 → 声音处理 → 对比 → 底噪条 → 常规。
   CHECK(l.advanced_toggle.bottom < l.scene_label.top);
   CHECK(l.scene_label.bottom <= l.preset[0].top);
   CHECK(l.preset[0].bottom <= l.plugin_label.top);
   CHECK(l.plugin_label.bottom <= l.plugin_slot[0].top);
   CHECK(l.plugin_slot[0].bottom <= l.plugin_slot[1].top);
   CHECK(l.plugin_slot[1].bottom <= l.plugin_slot[2].top);
-  CHECK(l.plugin_slot[2].bottom <= l.param_label.top);
-  CHECK(l.param_label.bottom <= l.param_row_origin.y);
-  CHECK(l.gain_slider.top >= l.param_row_origin.y);
+  // 插件槽之后直接接声音处理，参数面板不再占用纵向空间。
+  CHECK(l.plugin_slot[2].bottom <= l.sound_label.top);
+  CHECK(l.sound_label.top == l.plugin_slot[2].bottom + 12);
+  CHECK(l.gain_slider.top >= l.sound_label.bottom);
   CHECK(l.gain_slider.bottom <= l.effect[0].top);
   CHECK(l.effect[0].bottom <= l.compare.top);
   CHECK(l.compare.bottom <= l.meter.top);
   CHECK(l.meter.bottom <= l.option[0].top);
-  CHECK(l.option[0].bottom <= l.footer.top);
+  CHECK(l.option[0].bottom <= l.system_sound.top);
+  CHECK(l.system_sound.bottom <= l.footer.top);
   CHECK(l.footer.bottom + 14 == l.client_height);
+
+  // 系统声音入口是整行按钮，高度与 chips 一致。
+  CHECK(l.system_sound.left == kLeft && l.system_sound.right == kRight);
+  CHECK(l.system_sound.bottom - l.system_sound.top == 26);
 
   // 场景与效果 chips：同一行等宽，间距 6px。
   for (int i = 0; i < 4; ++i) {
@@ -317,15 +324,11 @@ void test_layout_geometry() {
   }
   CHECK(l.option[2].right == kRight);
 
-  // 插件槽等宽整行，参数页签靠右且互不重叠。
+  // 插件槽等宽整行：参数只在插件自己的界面里调，槽下方不再有参数页签。
   for (int slot = 0; slot < 3; ++slot) {
+    CHECK(l.plugin_slot[slot].left == kLeft && l.plugin_slot[slot].right == kRight);
     CHECK(l.plugin_slot[slot].bottom - l.plugin_slot[slot].top == 28);
   }
-  CHECK(l.param_tab[0].right < l.param_tab[1].left);
-  CHECK(l.param_tab[1].right < l.param_tab[2].left);
-  CHECK(l.param_tab[2].right == kRight);
-  CHECK(l.param_row_origin.x == kLeft);
-  CHECK(l.param_row_origin.y >= l.param_tab[0].bottom);
 
   // 增益滑杆单独一行，数值右对齐；输入/输出增益上下排列。
   CHECK(l.gain_slider.left == kLeft && l.gain_slider.right == kRight);
@@ -348,58 +351,11 @@ void test_layout_fixed_width() {
   begin("layout: fixed width");
 
   // 布局不再依赖客户区宽度：固定 300px 窄窗，传入任何宽度结果一致。
-  const std::size_t one_row[3] = {2, 0, 0};
-  const bool no_notes[3] = {false, false, false};
-  const ui::Layout fixed = ui::compute_layout(one_row, no_notes, true);
+  const ui::Layout fixed = ui::compute_layout(true);
   CHECK(fixed.header.right == 286);
   CHECK(fixed.power.right == 286);
   CHECK(fixed.meter.right == 286);
-  CHECK(fixed.client_height == 1042 + 26);
-
-  const int rows[] = {0, 1, 3, 8};
-  for (int row : rows) {
-    const std::size_t per_slot[3] = {static_cast<std::size_t>(row), 0, 0};
-    ui::Layout layout = ui::compute_layout(per_slot, no_notes, true);
-    CHECK(layout.header.right == 286);
-    CHECK(layout.compare.right == 286);
-  }
-}
-
-void test_layout_param_rows() {
-  begin("layout: parameter rows");
-
-  // 没有插件时仍保留一行空白，避免参数区塌陷。
-  const std::size_t none_rows[3] = {0, 0, 0};
-  const bool no_notes[3] = {false, false, false};
-  ui::Layout none = ui::compute_layout(none_rows, no_notes, true);
-  CHECK(none.client_height == 1042);
-  CHECK(none.param_row_origin.y == 684);
-
-  // 三行参数比一行高 2*26px。
-  const std::size_t three_rows[3] = {3, 0, 0};
-  ui::Layout three = ui::compute_layout(three_rows, no_notes, true);
-  CHECK(three.client_height == 1042 + 2 * 26);
-  CHECK(three.sound_label.top == none.sound_label.top + 2 * 26);
-
-  // 三个槽取参数行数最多的一个。
-  const std::size_t mixed_rows[3] = {2, 5, 0};
-  ui::Layout mixed = ui::compute_layout(mixed_rows, no_notes, true);
-  CHECK(mixed.client_height == 1042 + 4 * 26);
-  CHECK(mixed.footer.top == mixed.option[2].bottom + 10);
-
-  // 加载失败提示行额外占用 18px。
-  const bool one_note[3] = {false, true, false};
-  ui::Layout note = ui::compute_layout(none_rows, one_note, true);
-  CHECK(note.client_height == 1042 + 18);
-
-  const std::size_t four_rows[3] = {4, 4, 4};
-  const bool all_notes[3] = {true, true, true};
-  ui::Layout both = ui::compute_layout(four_rows, all_notes, true);
-  CHECK(both.client_height == 1042 + 3 * 26 + 18);
-
-  const int rows = ui::max_param_rows();
-  CHECK(rows >= 2 && rows <= 6);
-  CHECK(ui::max_param_rows() == rows);
+  CHECK(fixed.client_height == 960);
 }
 
 // ---------------------------------------------------------------------------
@@ -412,9 +368,7 @@ void test_drawing() {
   Canvas canvas;
   CHECK(canvas.create(340, 1060));
 
-  const std::size_t two_rows[3] = {2, 2, 0};
-  const bool no_notes[3] = {false, false, false};
-  ui::Layout layout = ui::compute_layout(two_rows, no_notes, true);
+  ui::Layout layout = ui::compute_layout(true);
   ui::HeadState state;
   state.advanced = true;
   state.footer_line = L"48 kHz · 10 ms · 处理中";
@@ -438,8 +392,7 @@ void test_drawing() {
 
   // 折叠态：页脚以下不再绘制任何内容。
   canvas.fill(RGB(255, 255, 255));
-  const std::size_t empty_rows[3] = {0, 0, 0};
-  ui::paint_all(canvas.dc, g_host, ui::compute_layout(empty_rows, no_notes, false), state);
+  ui::paint_all(canvas.dc, g_host, ui::compute_layout(false), state);
   CHECK(color_near(canvas.pixel(4, 4), bg, 2));
   CHECK(color_near(canvas.pixel(4, 519), bg, 2));
 
@@ -961,7 +914,6 @@ int main() {
 
   test_layout_geometry();
   test_layout_fixed_width();
-  test_layout_param_rows();
   test_drawing();
   test_hover_subclass();
   test_slider_range_contract();

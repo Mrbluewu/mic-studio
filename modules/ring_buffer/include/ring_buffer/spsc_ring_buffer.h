@@ -7,6 +7,13 @@
 
 namespace ms::ring_buffer {
 
+#if defined(_MSC_VER)
+// C4324「由于对齐说明符，结构被填充」：这里的填充正是本意——读写游标各占一条
+// 缓存行，避免生产者与消费者互相把对方的缓存行拉失效。定点抑制而非全局关闭。
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
+
 // 单生产者 / 单消费者无锁环形缓冲，元素为 float。
 // 写入端是采集线程，读取端是渲染线程；两端都不允许阻塞。
 class SpscRingBuffer {
@@ -82,5 +89,9 @@ class SpscRingBuffer {
   alignas(64) std::atomic<std::uint64_t> write_pos_{0};
   alignas(64) std::atomic<std::uint64_t> read_pos_{0};
 };
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 }  // namespace ms::ring_buffer

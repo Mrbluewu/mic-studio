@@ -25,7 +25,9 @@
 #include "platform/default_endpoint.h"
 #include "platform/utf8.h"
 #include "presets/preset_library.h"
+#ifdef MS_ENABLE_VST3
 #include "vst3_host/vst3_slot.h"
+#endif
 
 namespace {
 
@@ -723,8 +725,20 @@ int run_ab(const std::vector<std::wstring>& args) {
   constexpr std::size_t kSegment = 48000 * 2;
   std::vector<float> raw(kSegment, 0.0f);
   std::vector<float> processed(kSegment, 0.0f);
-  engine.raw_tap().read_latest(raw.data(), kSegment);
-  engine.processed_tap().read_latest(processed.data(), kSegment);
+  // 快照在读的过程中可能被渲染线程覆盖（返回 false）。导出是诊断用途，
+  // 重试几次拿一份一致快照；仍失败则保留最后一次结果继续。
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    if (engine.raw_tap().read_latest(raw.data(), kSegment)) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    if (engine.processed_tap().read_latest(processed.data(), kSegment)) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
 
   std::vector<float> sequence;
   sequence.reserve(kSegment * 4);
@@ -1013,6 +1027,7 @@ int run_oneshot(const std::vector<std::wstring>& args) {
 }
 
 // 列出 VST3 插件的参数 ID / 名称 / 默认值，便于用 --vst3-param 调节。
+#ifdef MS_ENABLE_VST3
 int run_vst3_info(const std::vector<std::wstring>& args) {
   std::wstring path;
   for (std::size_t i = 1; i < args.size(); ++i) {
@@ -1042,6 +1057,7 @@ int run_vst3_info(const std::vector<std::wstring>& args) {
   std::cout << "\n用法：engine-cli passthrough ... --vst3-param <id>=<0..1>\n";
   return 0;
 }
+#endif  // MS_ENABLE_VST3
 
 }  // namespace
 
@@ -1085,7 +1101,12 @@ int wmain(int argc, wchar_t** argv) {
     return run_oneshot(args);
   }
   if (args[0] == L"vst3-info") {
+#ifdef MS_ENABLE_VST3
     return run_vst3_info(args);
+#else
+    std::cout << "本次构建未包含 VST3 支持（配置时用了 -DMS_ENABLE_VST3=OFF）。\n";
+    return 2;
+#endif
   }
 
   print_usage();

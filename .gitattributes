@@ -1,0 +1,41 @@
+# git 行尾与二进制属性
+# 不强制 eol=lf：仓库已有文件混合提交过，强制归一化会产生整库 diff 噪音。
+# text=auto 让 git 按内容自动判定，Windows 检出时仍用 CRLF，不改变现有工作副本。
+* text=auto
+
+# 二进制资源：禁止行尾转换与文本 diff
+*.ico binary
+*.png binary
+*.jpg binary
+*.dll binary
+*.lib binary
+*.exe binary
+*.pdb binary
+*.xlsx binary
+*.pdf binary
+
+# 文本类型显式声明，避免个别扩展名被误判
+*.cpp text
+*.cc text
+*.c text
+*.h text
+*.hpp text
+*.cmake text
+*.txt text
+*.md text
+*.yml text
+*.yaml text
+*.iss text
+*.in text
+*.ps1 text
+*.rc text
+CMakeLists.txt text
+.gitignore text
+.gitattributes text
+.editorconfig text
+.clang-format text
+.clang-tidy text
+
+# GitHub 语言统计：third_party 与测试夹具不计入主语言占比
+third_party/** linguist-vendored
+tests/fixtures/** linguist-vendored

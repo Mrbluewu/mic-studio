@@ -25,7 +25,7 @@
 
 | 路径 | 用途 |
 |---|---|
-| `apps/micstudio/` | 主程序。`main.cpp` 窗口与消息循环，`ui_theme.*` 布局与绘制，`ui_controls.*` 自绘控件，`ui_icons.h` 内联图标，`micstudio.rc.in` 资源模板，`resource.h` 资源 ID |
+| `apps/micstudio/` | 主程序。`main.cpp` 进程启动与设备/引擎装配，`app_window.cpp` 窗口过程与命令分发，`app_ui.cpp` 面板构建与状态刷新，`app_plugins.cpp` 插件选择/参数/编辑器窗口，`ui_theme.*` 布局与绘制，`ui_controls.*` 自绘控件，`ui_icons.h` 内联图标，`micstudio.rc.in` 资源模板，`resource.h` 资源 ID |
 | `apps/engine-cli/` | 命令行工具，用于不启动界面时验证引擎链路 |
 
 程序入口只写「组装 + 消息分发」，音频处理一律下沉到 `modules/`。
@@ -57,7 +57,7 @@
 
 | 路径 | 内容 |
 |---|---|
-| `assets/icons/` | `mic-studio.ico`：exe 图标与安装包图标（被 `apps/micstudio/CMakeLists.txt` 与 `packaging/installer.iss` 引用） |
+| `assets/icons/` | `mic-studio.ico`：exe 图标与安装包图标（被 `apps/micstudio/CMakeLists.txt` 与 `packaging/installer.iss.in` 引用） |
 | `assets/images/` | `mic-studio.png`：文档与展示用位图 |
 
 移动或改名这里的文件，必须同批修改上述两处引用，否则构建或打包会中断。
@@ -66,14 +66,19 @@
 
 | 路径 | 内容 |
 |---|---|
-| `packaging/installer.iss` | Inno Setup 脚本：安装目录、快捷方式、卸载项、`AppVersion` |
+| `packaging/installer.iss.in` | Inno Setup 脚本模板：安装目录、快捷方式、卸载项、LicenseFile；`{#AppVersion}` 由 CMake 注入 |
+
+模板在 CMake 配置阶段生成到 `build/packaging/installer.iss`，故模板内的相对路径以 `build/packaging/` 为基准（用 `..\..\` 回到仓库根）。修改打包配置请改 `.in` 模板，不要改生成物。
 
 ## tests/
 
 | 路径 | 内容 |
 |---|---|
-| `tests/CMakeLists.txt` | 测试目标定义 |
+| `tests/CMakeLists.txt` | 测试目标定义（三个测试目标均注册到 CTest） |
 | `tests/ui_tests.cpp` | 布局与控件行为测试，含窗口高度基线 |
+| `tests/dsp_core_tests.cpp` | 重采样、格式桥、参数队列等 DSP 基础件测试 |
+| `tests/concurrency_tests.cpp` | 环缓冲、TAP 缓冲、参数队列的并发正确性测试 |
+| `tests/support/check.h` | 测试断言宏与计数汇总 |
 | `tests/fixtures/plugins/VST3/` | DeepFilterNet 的 VST3 bundle，作 VST3 托管的手工验证样本；**不入库**，需要时自行准备 `DeepFilterNet.vst3` 并整目录放到本路径 |
 
 VST2 托管验证不需要单独夹具：`third_party/deepfilternet/DeepFilterNet.dll` 与 VST2 插件二进制完全一致（MD5
@@ -107,7 +112,7 @@ VST2 托管验证不需要单独夹具：`third_party/deepfilternet/DeepFilterNe
 两者都不入库，可随时删除重建：
 
 - `build/`：CMake 生成物、编译中间文件、`tools/` 脚本的输出
-- `dist/`：`packaging/installer.iss` 产出的安装包
+- `dist/`：`build/packaging/installer.iss` 产出的安装包
 
 ## 存放规则速查
 

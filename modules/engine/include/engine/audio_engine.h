@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dsp_core/bounded_parameter_queue.h"
 #include "engine/tap_buffer.h"
 #include "platform/error.h"
 
@@ -17,7 +18,7 @@ struct PluginParameter {
   float value = 0.0f;  // 归一化 0..1
 };
 
-// 运行时参数快照：GUI 用来构建/刷新参数面板。
+// 运行时参数快照：宿主用来持久化插件编辑器里改过的值。
 struct PluginParameterInfo {
   int slot = 0;  // 插件槽序号，0 起
   int id = 0;
@@ -25,11 +26,17 @@ struct PluginParameterInfo {
   float value = 0.0f;  // 当前归一化值 0..1
 };
 
-// 插件界面产生的参数变化，GUI 用来回同步滑杆。
+// 插件界面产生的参数变化，宿主用来标记参数快照需要落盘。
 struct PluginParameterChange {
   int slot = 0;
   int id = 0;
   float value = 0.0f;
+};
+
+// UI 线程投递到音频线程的插件参数命令：定容量、无锁、满载丢弃。
+// 打包成 8 字节以适配队列单元：slot 8 位 | id 24 位 | 归一化值 32 位（float 位模式）。
+struct PluginParameterCommand {
+  std::uint64_t packed = 0;
 };
 
 // 一个插件槽：槽内只能是 VST2 或 VST3 之一。
@@ -43,7 +50,9 @@ struct EngineOptions {
   std::wstring input_endpoint_id;
   std::wstring output_endpoint_id;
   std::uint32_t engine_rate = 48000;
-  double target_fill_ms = 20.0;
+  // 环形缓冲目标水位。12 ms 在 60 s 压测里出现个别掉帧（最低水位仅 3.7 ms），
+  // 取 15 ms：仍能吸收 10 ms 采集包节拍与线程调度抖动，又比原来的 20 ms 少 5 ms。
+  double target_fill_ms = 15.0;
   float input_gain_db = 0.0f;
   float output_gain_db = 0.0f;
   float denoise_amount = 0.0f;
@@ -143,6 +152,7 @@ class AudioEngine {
   bool plugin_editor_size(int slot, int& width, int& height) const;
 
   EngineState state() const noexcept;
+  // 全部字段来自 atomic 快照，可在任意线程高频调用。
   Stats stats() const noexcept;
 
   // A/B 对比用的最近 4 秒缓存（非实时读取）

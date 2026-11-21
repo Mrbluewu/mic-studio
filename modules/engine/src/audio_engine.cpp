@@ -15,12 +15,15 @@
 #include "engine/tap_buffer.h"
 #include "ring_buffer/spsc_ring_buffer.h"
 #include "vst2_host/vst2_slot.h"
+#ifdef MS_ENABLE_VST3
 #include "vst3_host/vst3_slot.h"
+#endif
 
 #include <winerror.h>
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -35,6 +38,15 @@ constexpr std::size_t kRenderScratchFrames = 16384;
 constexpr std::size_t kRingCapacityFrames = 48000;  // 1 秒，远大于 20 ms 目标水位
 constexpr std::size_t kTapFrames = 48000 * 4;       // A/B 对比保留最近 4 秒
 constexpr double kConverterFifoFrames = 2.0;        // 重采样器内部只需保留插值所需的最小值
+constexpr float kLimiterCeilingDb = -1.0f;          // 输出天花板：留 1 dB 余量给重采样过冲
+constexpr std::uint64_t kPluginCommandIdMax = 0xFFFFFFu;  // id 占 24 位
+
+// 参数命令打包/解包：slot 8 位 | id 24 位 | 归一化值 32 位。
+std::uint64_t encode_plugin_command(int slot, int id, float value) noexcept {
+  return (static_cast<std::uint64_t>(static_cast<std::uint8_t>(slot)) << 56) |
+         (static_cast<std::uint64_t>(static_cast<std::uint32_t>(id)) << 32) |
+         std::bit_cast<std::uint32_t>(value);
+}
 }  // namespace
 
 struct AudioEngine::Impl {
@@ -56,7 +68,12 @@ struct AudioEngine::Impl {
   dsp_core::Limiter* limiter = nullptr;
   denoise::Denoiser* denoise = nullptr;
   denoise::DeepFilterDenoiser* deepfilter = nullptr;
-  bool deepfilter_active = false;
+  // 以下四项只在 start_pipeline 重建链路时写入（持 pipeline_mutex），
+  // 由 stats() 在 UI 线程高频读取，因此做成 atomic 以免轮询被锁拖住。
+  std::atomic<bool> deepfilter_active{false};
+  std::atomic<int> plugins_loaded{0};
+  std::atomic<double> plugin_latency_ms{0.0};
+  std::atomic<double> deepfilter_latency_ms{0.0};
   // 内置降噪加载失败的原因（空串表示正常）。
   std::wstring builtin_error;
 
@@ -65,7 +82,9 @@ struct AudioEngine::Impl {
     int slot = 0;
     bool is_vst3 = false;
     vst2_host::Vst2Slot* vst2 = nullptr;
+#ifdef MS_ENABLE_VST3
     vst3_host::Vst3Slot* vst3 = nullptr;
+#endif
   };
   std::vector<LoadedPlugin> plugins;
   std::vector<std::wstring> plugin_errors;
@@ -94,7 +113,9 @@ struct AudioEngine::Impl {
   std::vector<float> render_in = std::vector<float>(kRenderScratchFrames, 0.0f);
   std::vector<float> render_scratch = std::vector<float>(kRenderScratchFrames, 0.0f);
 
-  bool warmed_up = false;
+  // 预灌状态由渲染回调独占写入，但 start_pipeline 在别的线程复位，
+  // 因此用 atomic 保证跨线程可见性。
+  std::atomic<bool> warmed_up{false};
   // 取输入时的小数累加器，保证 ppm 级比率修正不会被整块取整吞掉
   double pull_accumulator = 0.0;
 
@@ -107,10 +128,12 @@ struct AudioEngine::Impl {
   std::atomic<std::uint32_t> recoveries{0};
   std::atomic<bool> bypass{false};
 
-  double engine_rate = 48000.0;
+  // stats() 在 UI 线程无锁读取这几个值，而 start_pipeline 会重写它们，
+  // 故与其它统计字段一样用 atomic 发布。
+  std::atomic<double> engine_rate{48000.0};
   double target_fill_frames = 960.0;
-  std::uint32_t capture_period_frames = 480;
-  std::uint32_t render_period_frames = 480;
+  std::atomic<std::uint32_t> capture_period_frames{480};
+  std::atomic<std::uint32_t> render_period_frames{480};
 
   EngineOptions options;
   std::wstring active_input_id;
@@ -121,10 +144,15 @@ struct AudioEngine::Impl {
   std::atomic<bool> watchdog_stop{false};
   std::atomic<bool> recovery_requested{false};
 
+  // UI → 音频线程的插件参数命令。UI 侧只入队，音频线程每块处理前 drain，
+  // 这样插件实例只会在音频线程被写参数，不需要跨线程锁。
+  ms::dsp_core::BoundedParameterQueue<PluginParameterCommand, 256> plugin_commands;
+
   platform::Error start_pipeline(const EngineOptions& opts);
   void stop_pipeline();
   void start_watchdog();
   void stop_watchdog();
+  void apply_plugin_parameter(const PluginParameterCommand& command);
 };
 
 platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
@@ -132,8 +160,8 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
 
   stop_pipeline();
 
-  engine_rate = static_cast<double>(opts.engine_rate == 0 ? 48000 : opts.engine_rate);
-  target_fill_frames = engine_rate * opts.target_fill_ms / 1000.0;
+  engine_rate.store(static_cast<double>(opts.engine_rate == 0 ? 48000 : opts.engine_rate));
+  target_fill_frames = engine_rate.load() * opts.target_fill_ms / 1000.0;
   state.store(EngineState::Starting);
   ring.reset();
   captured.store(0);
@@ -141,7 +169,7 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
   overruns.store(0);
   underruns.store(0);
   applied_ppm.store(0.0);
-  warmed_up = false;
+  warmed_up.store(false, std::memory_order_relaxed);
   pull_accumulator = 0.0;
   noise_in.reset();
   noise_out.reset();
@@ -154,7 +182,7 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
 
   error = render.open(opts.output_endpoint_id);
   if (error.failed()) {
-    capture.stop();
+    stop_pipeline();
     state.store(EngineState::Failed);
     return error;
   }
@@ -162,17 +190,19 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
   capture_bridge.prepare(capture.format(), opts.engine_rate);
   render_bridge.prepare(render.format(), opts.engine_rate);
   if (!capture_bridge.supported()) {
+    stop_pipeline();
     state.store(EngineState::Failed);
     return platform::Error::make(platform::ErrorCode::FormatUnsupported, E_INVALIDARG,
                                  L"采集端点格式不受支持（仅支持 32-bit float / 16-bit int）");
   }
   if (!render_bridge.supported()) {
+    stop_pipeline();
     state.store(EngineState::Failed);
     return platform::Error::make(platform::ErrorCode::FormatUnsupported, E_INVALIDARG,
                                  L"渲染端点格式不受支持（仅支持 32-bit float / 16-bit int）");
   }
 
-  const double nominal_step = engine_rate / static_cast<double>(render_bridge.device_rate());
+  const double nominal_step = engine_rate.load() / static_cast<double>(render_bridge.device_rate());
   drift.prepare(nominal_step, target_fill_frames);
   converter.prepare(nominal_step);
 
@@ -195,7 +225,7 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
     limiter = nullptr;
     denoise = nullptr;
     deepfilter = nullptr;
-    deepfilter_active = false;
+    deepfilter_active.store(false, std::memory_order_relaxed);
     plugins.clear();
     plugin_errors.clear();
     clarity = nullptr;
@@ -218,7 +248,7 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
         const auto load_error = dfn->load(opts.deepfilter_path);
         if (load_error.ok()) {
           deepfilter = dfn.get();
-          deepfilter_active = true;
+          deepfilter_active.store(true, std::memory_order_relaxed);
           denoise_stage = std::move(dfn);
         } else {
           builtin_error = load_error.message;
@@ -238,14 +268,24 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
         continue;
       }
       if (slot.vst3) {
+#ifdef MS_ENABLE_VST3
         auto stage = std::make_unique<vst3_host::Vst3Slot>();
         const auto plugin_error = stage->load(slot.path);
         if (plugin_error.failed()) {
           plugin_errors.back() = plugin_error.message;
           continue;
         }
-        plugins.push_back(LoadedPlugin{static_cast<int>(i), true, nullptr, stage.get()});
+        LoadedPlugin entry;
+        entry.slot = static_cast<int>(i);
+        entry.is_vst3 = true;
+        entry.vst3 = stage.get();
+        plugins.push_back(entry);
         pending_plugins.push_back(PendingPlugin{static_cast<int>(i), std::move(stage)});
+#else
+        // 关闭 VST3 的构建里槽位仍然存在，只是加载必定失败并给出明确原因。
+        plugin_errors.back() = L"本次构建未包含 VST3 支持（MS_ENABLE_VST3=OFF）";
+        continue;
+#endif
       } else {
         auto stage = std::make_unique<vst2_host::Vst2Slot>();
         const auto plugin_error = stage->load(slot.path);
@@ -253,7 +293,11 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
           plugin_errors.back() = plugin_error.message;
           continue;
         }
-        plugins.push_back(LoadedPlugin{static_cast<int>(i), false, stage.get(), nullptr});
+        LoadedPlugin entry;
+        entry.slot = static_cast<int>(i);
+        entry.is_vst3 = false;
+        entry.vst2 = stage.get();
+        plugins.push_back(entry);
         pending_plugins.push_back(PendingPlugin{static_cast<int>(i), std::move(stage)});
       }
     }
@@ -289,7 +333,7 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
   }
   {
     dsp_core::ProcessContext context;
-    context.sampleRate = engine_rate;
+    context.sampleRate = engine_rate.load();
     context.maxBlockSize = static_cast<int>(kRenderScratchFrames);
     chain.prepare(context);
     chain.reset();
@@ -305,17 +349,20 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
     body->set_enabled(opts.body);
     leveler->set_enabled(opts.leveler);
     deesser->set_enabled(opts.deesser);
-    limiter->set_ceiling_db(-1.0f);
+    limiter->set_ceiling_db(kLimiterCeilingDb);
     for (const auto& loaded : plugins) {
       if (loaded.slot >= static_cast<int>(opts.plugins.size())) {
         continue;
       }
       for (const auto& parameter : opts.plugins[loaded.slot].params) {
-        if (loaded.vst3 && loaded.vst3 != nullptr) {
-          loaded.vst3->set_parameter(parameter.index, parameter.value);
-        } else if (loaded.vst2 != nullptr) {
+        if (loaded.vst2 != nullptr) {
           loaded.vst2->set_parameter(parameter.index, parameter.value);
         }
+#ifdef MS_ENABLE_VST3
+        else if (loaded.vst3 != nullptr) {
+          loaded.vst3->set_parameter(parameter.index, parameter.value);
+        }
+#endif
       }
     }
   }
@@ -323,24 +370,56 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
   // 参数表只在此时（流尚未启动）读取一次，之后由 GUI 读缓存。
   plugin_info.clear();
   for (const auto& loaded : plugins) {
-    if (loaded.vst3 && loaded.vst3 != nullptr) {
-      for (const auto& parameter : loaded.vst3->parameters()) {
-        plugin_info.push_back(
-            PluginParameterInfo{loaded.slot, parameter.id, parameter.name, parameter.value});
-      }
-    } else if (loaded.vst2 != nullptr) {
+    if (loaded.vst2 != nullptr) {
       for (const auto& parameter : loaded.vst2->parameters()) {
         plugin_info.push_back(
             PluginParameterInfo{loaded.slot, parameter.id, parameter.name, parameter.value});
       }
     }
+#ifdef MS_ENABLE_VST3
+    else if (loaded.vst3 != nullptr) {
+      for (const auto& parameter : loaded.vst3->parameters()) {
+        plugin_info.push_back(
+            PluginParameterInfo{loaded.slot, parameter.id, parameter.name, parameter.value});
+      }
+    }
+#endif
   }
 
-  capture_period_frames = std::max(1u, capture.format().sampleRate / 100u);
-  render_period_frames = std::max(1u, render.buffer_frames() / 2u);
+  // 把插件与降噪的静态属性快照成 atomic，供 stats() 无锁读取。
+  {
+    int loaded_count = 0;
+    double plugin_latency = 0.0;
+    for (const auto& loaded : plugins) {
+      ++loaded_count;
+      if (loaded.vst2 != nullptr) {
+        plugin_latency += loaded.vst2->latency_frames() * 1000.0 / engine_rate.load();
+      }
+#ifdef MS_ENABLE_VST3
+      else if (loaded.vst3 != nullptr) {
+        plugin_latency += loaded.vst3->latency_frames() * 1000.0 / engine_rate.load();
+      }
+#endif
+    }
+    plugins_loaded.store(loaded_count, std::memory_order_relaxed);
+    plugin_latency_ms.store(plugin_latency, std::memory_order_relaxed);
+    const double dfn_latency = deepfilter != nullptr
+                                   ? deepfilter->latency_frames() * 1000.0 / engine_rate.load()
+                                   : 0.0;
+    deepfilter_latency_ms.store(dfn_latency, std::memory_order_relaxed);
+  }
+
+  // 采集周期取引擎实际协商值（通常 10 ms，即设备最小周期）；拿不到时按 10 ms 估算。
+  const std::uint32_t capture_period = capture.period_frames() != 0
+                                           ? capture.period_frames()
+                                           : std::max(1u, capture.format().sampleRate / 100u);
+  capture_period_frames.store(capture_period);
+  render_period_frames.store(std::max(1u, render.buffer_frames() / 2u));
 
   error = capture.start([this](const std::uint8_t* data, std::uint32_t frames,
                                const audio_io::AudioFormat&) {
+    // 设备回调给出的帧数不可信：夹到本地工作区尺度，避免异常值放大单次回调耗时。
+    frames = std::min<std::uint32_t>(frames, static_cast<std::uint32_t>(kCaptureScratchFrames));
     const std::size_t produced = capture_bridge.process(data, frames, capture_scratch.data(),
                                                         capture_scratch.size());
     if (produced == 0) {
@@ -353,41 +432,22 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
     captured.fetch_add(written, std::memory_order_relaxed);
   });
   if (error.failed()) {
+    stop_pipeline();
     state.store(EngineState::Failed);
     return error;
   }
 
-  // 预灌：等水位接近目标再开闸，避免开流瞬间的一串欠载。
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1200);
-  while (std::chrono::steady_clock::now() < deadline && !warmed_up) {
-    if (static_cast<double>(ring.available_read()) >= target_fill_frames) {
-      warmed_up = true;
-      break;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-  }
-
+  // 预灌交给渲染回调自己掌握：这里是音频线程，短暂输出静音即可，
+  // 不允许在调用方（UI 线程）忙等——那会卡住界面最多 1.2 秒。
   error = render.start([this](std::uint8_t* data, std::uint32_t frames,
                               const audio_io::AudioFormat&) {
+    // 设备回调给出的帧数不可信：必须夹到本地工作区容量内，
+    // 否则下面的 std::fill / 重采样输出都会越过 render_scratch 末尾。
+    frames = std::min<std::uint32_t>(frames, static_cast<std::uint32_t>(kRenderScratchFrames));
     std::uint64_t fill = ring.available_read();
 
-    // 未达目标水位前只输出静音：避免开流瞬间的欠载，也防止首块把缓冲抽干。
-    if (!warmed_up) {
-      warmed_up = static_cast<double>(fill) >= target_fill_frames;
-      if (!warmed_up) {
-        std::fill(render_scratch.begin(), render_scratch.begin() + frames, 0.0f);
-        render_bridge.write(render_scratch.data(), frames, data);
-        rendered.fetch_add(frames, std::memory_order_relaxed);
-        fill_frames.store(static_cast<std::uint32_t>(fill), std::memory_order_relaxed);
-        return;
-      }
-    }
-
-    // 异常积压恢复：设备切换、插件初始化等一次性停顿会让水位永久偏高。
-    // 超过目标 3 倍时直接丢弃多余输入，把延迟拉回正常范围（仅在异常时触发）。
-    const auto max_fill = static_cast<std::uint64_t>(target_fill_frames * 3.0);
-    if (fill > max_fill) {
-      std::uint64_t drop = fill - static_cast<std::uint64_t>(target_fill_frames);
+    // 丢弃最旧的输入：只在预灌收敛与异常积压两处调用，稳态不触发。
+    auto drop_oldest = [this](std::uint64_t drop) {
       while (drop > 0) {
         const std::size_t chunk =
             static_cast<std::size_t>(std::min<std::uint64_t>(drop, render_in.size()));
@@ -397,6 +457,34 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
         }
         drop -= got;
       }
+    };
+
+    // 未达目标水位前只输出静音：避免开流瞬间的欠载，也防止首块把缓冲抽干。
+    // 这一步完全在音频线程内完成，不阻塞调用方。
+    if (!warmed_up.load(std::memory_order_relaxed)) {
+      const bool ready = static_cast<double>(fill) >= target_fill_frames;
+      if (!ready) {
+        std::fill(render_scratch.begin(), render_scratch.begin() + frames, 0.0f);
+        render_bridge.write(render_scratch.data(), frames, data);
+        rendered.fetch_add(frames, std::memory_order_relaxed);
+        fill_frames.store(static_cast<std::uint32_t>(fill), std::memory_order_relaxed);
+        return;
+      }
+      // 开闸时把超出目标的水位一次性裁掉：采集端在预灌期间可能已积压数个包，
+      // 而漂移控制器受 ±2000 ppm 限幅（约 2 ms/s）要好几秒才能抽干，这段时间
+      // 显示的延迟会明显偏高。此时还没输出过真实音频，裁掉不产生可闻断点。
+      if (static_cast<double>(fill) > target_fill_frames) {
+        drop_oldest(fill - static_cast<std::uint64_t>(target_fill_frames));
+        fill = ring.available_read();
+      }
+      warmed_up.store(true, std::memory_order_relaxed);
+    }
+
+    // 异常积压恢复：设备切换、插件初始化等一次性停顿会让水位永久偏高。
+    // 超过目标 3 倍时直接丢弃多余输入，把延迟拉回正常范围（仅在异常时触发）。
+    const auto max_fill = static_cast<std::uint64_t>(target_fill_frames * 3.0);
+    if (fill > max_fill) {
+      drop_oldest(fill - static_cast<std::uint64_t>(target_fill_frames));
       fill = ring.available_read();
     }
 
@@ -417,8 +505,12 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
     pull_in = std::min(pull_in, render_in.size());
 
     const std::size_t got = ring.read(render_in.data(), pull_in);
-    if (got == 0 && fifo < kConverterFifoFrames) {
-      underruns.fetch_add(1, std::memory_order_relaxed);
+
+    // 先把 UI 投递的参数命令写进插件，再跑处理链：命令队列无锁定容量，
+    // 这里不取锁也不分配；满载时由 UI 侧丢弃，音频线程永不等候。
+    PluginParameterCommand command;
+    while (plugin_commands.try_pop(command)) {
+      apply_plugin_parameter(command);
     }
 
     if (got > 0) {
@@ -436,16 +528,21 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
 
     std::size_t produced = converter.pull(render_scratch.data(), frames);
     if (produced < frames) {
+      // 本块凑不满一个设备周期：输出里会出现真实空洞（可闻的掉帧），
+      // 按欠载计数。旧实现只在环形缓冲取到 0 帧时计数，会漏掉部分缺口。
+      underruns.fetch_add(1, std::memory_order_relaxed);
       std::fill(render_scratch.begin() + produced, render_scratch.begin() + frames, 0.0f);
     }
 
     render_bridge.write(render_scratch.data(), frames, data);
     rendered.fetch_add(frames, std::memory_order_relaxed);
-    fill_frames.store(static_cast<std::uint32_t>(ring.available_read()),
-                      std::memory_order_relaxed);
+    // 上报的水位必须与喂给 drift 的是同一个采样点（本块开头）。
+    // 若这里改成块尾的 available_read()，读数会比控制目标小整整一个块
+    // （稳态下 480 帧 = 10 ms），看起来像永远达不到目标水位。
+    fill_frames.store(static_cast<std::uint32_t>(fill), std::memory_order_relaxed);
   });
   if (error.failed()) {
-    capture.stop();
+    stop_pipeline();
     state.store(EngineState::Failed);
     return error;
   }
@@ -457,14 +554,42 @@ platform::Error AudioEngine::Impl::start_pipeline(const EngineOptions& opts) {
 void AudioEngine::Impl::stop_pipeline() {
   std::lock_guard<std::recursive_mutex> lock(pipeline_mutex);
   state.store(EngineState::Stopped);
-  render.stop();
-  capture.stop();
+  // close 而非 stop：失败/停止后立即把端点还给系统，避免麦克风占用指示常亮。
+  render.close();
+  capture.close();
   ring.reset();
+  // 链重建后插件实例会被替换，残留命令不能带到新实例上。
+  PluginParameterCommand discarded;
+  while (plugin_commands.try_pop(discarded)) {
+  }
+}
+
+// 只在音频线程调用：把一条参数命令写到对应插件槽。
+void AudioEngine::Impl::apply_plugin_parameter(const PluginParameterCommand& command) {
+  const int slot = static_cast<int>(command.packed >> 56);
+  const int id = static_cast<int>((command.packed >> 32) & kPluginCommandIdMax);
+  const float value = std::bit_cast<float>(static_cast<std::uint32_t>(command.packed));
+  for (const auto& loaded : plugins) {
+    if (loaded.slot != slot) {
+      continue;
+    }
+    if (loaded.vst2 != nullptr) {
+      loaded.vst2->set_parameter(id, value);
+    }
+#ifdef MS_ENABLE_VST3
+    else if (loaded.vst3 != nullptr) {
+      loaded.vst3->set_parameter(id, value);
+    }
+#endif
+    return;
+  }
 }
 
 void AudioEngine::Impl::start_watchdog() {
   watchdog_stop.store(false);
   watchdog = std::thread([this] {
+    constexpr int kMaxRecoveryAttempts = 5;
+    int failures = 0;
     while (!watchdog_stop.load()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -481,10 +606,31 @@ void AudioEngine::Impl::start_watchdog() {
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
       const auto error = start_pipeline(options);
-      state.store(error.ok() ? EngineState::Running : EngineState::Failed);
       if (error.ok()) {
+        state.store(EngineState::Running);
         recoveries.fetch_add(1);
+        failures = 0;
+        continue;
       }
+
+      // 瞬时故障（设备占用、驱动重置）往往重试即可恢复；连续失败到上限后
+      // 停在 Failed，交给用户手动处理，避免无限重试刷屏。
+      ++failures;
+      if (failures >= kMaxRecoveryAttempts) {
+        state.store(EngineState::Failed);
+        continue;
+      }
+      state.store(EngineState::Recovering);
+      const int backoff_ms = std::min(8000, 1000 << (failures - 1));
+      const auto until =
+          std::chrono::steady_clock::now() + std::chrono::milliseconds(backoff_ms);
+      // 切片等待：保持退出时 join 的最坏延迟在 100 ms 量级。
+      while (!watchdog_stop.load() && std::chrono::steady_clock::now() < until) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+      // 退避结束后重新排队一次；此循环只在 recovery_requested 置位时才会重试，
+      // 不在这里补一次请求的话，失败后就永远停在 Recovering 再也不会重来。
+      recovery_requested.store(true);
     }
   });
 }
@@ -531,24 +677,30 @@ void AudioEngine::stop() {
 }
 
 void AudioEngine::set_input_gain_db(float db) {
+  // 控制面与 start_pipeline 共用一把锁：重启时 chain 会被整体重建，
+  // 处理器指针会短暂悬空，必须与这里的解引用互斥。
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   if (impl_->gain != nullptr) {
     impl_->gain->set_gain_db(db);
   }
 }
 
 void AudioEngine::set_output_gain_db(float db) {
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   if (impl_->out_gain != nullptr) {
     impl_->out_gain->set_gain_db(db);
   }
 }
 
 void AudioEngine::set_denoise_amount(float amount) {
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   if (impl_->denoise != nullptr) {
     impl_->denoise->set_amount(amount);
   }
 }
 
 void AudioEngine::set_effects(bool clarity, bool body, bool leveler, bool deesser) {
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   if (impl_->clarity != nullptr) {
     impl_->clarity->set_enabled(clarity);
   }
@@ -566,31 +718,29 @@ void AudioEngine::set_effects(bool clarity, bool body, bool leveler, bool deesse
 void AudioEngine::set_bypass(bool bypass) { impl_->bypass.store(bypass); }
 
 std::vector<PluginParameterInfo> AudioEngine::plugin_parameters() const {
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   return impl_->plugin_info;
 }
 
 void AudioEngine::set_plugin_parameter(int slot, int id, float value) {
+  // 只更新 UI 缓存并入队，插件实例留给音频线程写：链路可能正在重建，
+  // 直接从 UI 触摸插件对象会踩到已析构的实例。
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
+  const float normalized = std::clamp(value, 0.0f, 1.0f);
   for (auto& info : impl_->plugin_info) {
     if (info.slot == slot && info.id == id) {
-      info.value = value;
+      info.value = normalized;
       break;
     }
   }
-
-  for (const auto& loaded : impl_->plugins) {
-    if (loaded.slot != slot) {
-      continue;
-    }
-    if (loaded.vst3 && loaded.vst3 != nullptr) {
-      loaded.vst3->set_parameter(id, value);
-    } else if (loaded.vst2 != nullptr) {
-      loaded.vst2->set_parameter(id, value);
-    }
+  if (id < 0 || static_cast<std::uint64_t>(static_cast<std::uint32_t>(id)) > kPluginCommandIdMax) {
     return;
   }
+  impl_->plugin_commands.try_push({encode_plugin_command(slot, id, normalized)});
 }
 
 std::vector<PluginParameterChange> AudioEngine::take_plugin_parameter_changes() {
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   std::vector<PluginParameterChange> result;
 
   auto record = [this, &result](int slot, int id, float value) {
@@ -608,90 +758,118 @@ std::vector<PluginParameterChange> AudioEngine::take_plugin_parameter_changes() 
   };
 
   for (const auto& loaded : impl_->plugins) {
-    if (loaded.vst3 && loaded.vst3 != nullptr) {
-      for (const auto& change : loaded.vst3->take_parameter_changes()) {
-        record(loaded.slot, change.id, change.value);
-      }
-    } else if (loaded.vst2 != nullptr) {
+    if (loaded.vst2 != nullptr) {
       for (const auto& change : loaded.vst2->take_parameter_changes()) {
         record(loaded.slot, change.id, change.value);
       }
     }
+#ifdef MS_ENABLE_VST3
+    else if (loaded.vst3 != nullptr) {
+      for (const auto& change : loaded.vst3->take_parameter_changes()) {
+        record(loaded.slot, change.id, change.value);
+      }
+    }
+#endif
   }
   return result;
 }
 
 std::vector<std::wstring> AudioEngine::plugin_slot_errors() const {
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   return impl_->plugin_errors;
 }
 
 std::wstring AudioEngine::builtin_denoise_error() const {
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   return impl_->builtin_error;
 }
 
 bool AudioEngine::plugin_has_editor(int slot) const {
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   for (const auto& loaded : impl_->plugins) {
     if (loaded.slot != slot) {
       continue;
     }
-    if (loaded.vst3 && loaded.vst3 != nullptr) {
-      return loaded.vst3->has_editor();
+    if (loaded.vst2 != nullptr) {
+      return loaded.vst2->has_editor();
     }
-    return loaded.vst2 != nullptr && loaded.vst2->has_editor();
+#ifdef MS_ENABLE_VST3
+    return loaded.vst3 != nullptr && loaded.vst3->has_editor();
+#else
+    return false;
+#endif
   }
   return false;
 }
 
 bool AudioEngine::open_plugin_editor(int slot, void* parent, int& width, int& height) {
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   for (const auto& loaded : impl_->plugins) {
     if (loaded.slot != slot) {
       continue;
     }
-    if (loaded.vst3 && loaded.vst3 != nullptr) {
-      return loaded.vst3->open_editor(parent, width, height);
+    if (loaded.vst2 != nullptr) {
+      return loaded.vst2->open_editor(parent, width, height);
     }
-    return loaded.vst2 != nullptr && loaded.vst2->open_editor(parent, width, height);
+#ifdef MS_ENABLE_VST3
+    return loaded.vst3 != nullptr && loaded.vst3->open_editor(parent, width, height);
+#else
+    return false;
+#endif
   }
   return false;
 }
 
 void AudioEngine::close_plugin_editor(int slot) {
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   for (const auto& loaded : impl_->plugins) {
     if (loaded.slot != slot) {
       continue;
     }
-    if (loaded.vst3 && loaded.vst3 != nullptr) {
-      loaded.vst3->close_editor();
-    } else if (loaded.vst2 != nullptr) {
+    if (loaded.vst2 != nullptr) {
       loaded.vst2->close_editor();
     }
+#ifdef MS_ENABLE_VST3
+    else if (loaded.vst3 != nullptr) {
+      loaded.vst3->close_editor();
+    }
+#endif
     return;
   }
 }
 
 void AudioEngine::plugin_editor_idle(int slot) {
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   for (const auto& loaded : impl_->plugins) {
     if (loaded.slot != slot) {
       continue;
     }
-    if (loaded.vst3 && loaded.vst3 != nullptr) {
-      loaded.vst3->editor_idle();
-    } else if (loaded.vst2 != nullptr) {
+    if (loaded.vst2 != nullptr) {
       loaded.vst2->editor_idle();
     }
+#ifdef MS_ENABLE_VST3
+    else if (loaded.vst3 != nullptr) {
+      loaded.vst3->editor_idle();
+    }
+#endif
     return;
   }
 }
 
 bool AudioEngine::plugin_editor_size(int slot, int& width, int& height) const {
+  std::lock_guard<std::recursive_mutex> lock(impl_->pipeline_mutex);
   for (const auto& loaded : impl_->plugins) {
     if (loaded.slot != slot) {
       continue;
     }
-    if (loaded.vst3 && loaded.vst3 != nullptr) {
-      return loaded.vst3->editor_size(width, height);
+    if (loaded.vst2 != nullptr) {
+      return loaded.vst2->editor_size(width, height);
     }
-    return loaded.vst2 != nullptr && loaded.vst2->editor_size(width, height);
+#ifdef MS_ENABLE_VST3
+    return loaded.vst3 != nullptr && loaded.vst3->editor_size(width, height);
+#else
+    return false;
+#endif
   }
   return false;
 }
@@ -703,35 +881,27 @@ const TapBuffer& AudioEngine::raw_tap() const noexcept { return impl_->raw_tap; 
 const TapBuffer& AudioEngine::processed_tap() const noexcept { return impl_->processed_tap; }
 
 AudioEngine::Stats AudioEngine::stats() const noexcept {
+  // 全部字段来自 atomic 快照，不加锁：这个函数被 UI 以每帧频率调用，
+  // 不能在链路重建（可能长达数百毫秒）期间被阻塞。
   Stats stats;
   stats.captured_frames = impl_->captured.load(std::memory_order_relaxed);
   stats.rendered_frames = impl_->rendered.load(std::memory_order_relaxed);
   stats.overruns = impl_->overruns.load(std::memory_order_relaxed);
   stats.underruns = impl_->underruns.load(std::memory_order_relaxed);
   stats.fill_frames = impl_->fill_frames.load(std::memory_order_relaxed);
-  stats.fill_ms = stats.fill_frames * 1000.0 / impl_->engine_rate;
+  stats.fill_ms = stats.fill_frames * 1000.0 / impl_->engine_rate.load(std::memory_order_relaxed);
   stats.applied_ppm = impl_->applied_ppm.load(std::memory_order_relaxed);
   stats.latency_ms =
-      (stats.fill_frames + impl_->capture_period_frames + impl_->render_period_frames) * 1000.0 /
-      impl_->engine_rate;
+      (stats.fill_frames + impl_->capture_period_frames.load(std::memory_order_relaxed) +
+       impl_->render_period_frames.load(std::memory_order_relaxed)) *
+      1000.0 / impl_->engine_rate.load(std::memory_order_relaxed);
 
-  stats.deepfilter_active = impl_->deepfilter_active;
-  if (impl_->deepfilter_active && impl_->deepfilter != nullptr) {
-    stats.deepfilter_latency_ms =
-        impl_->deepfilter->latency_frames() * 1000.0 / impl_->engine_rate;
-    stats.latency_ms += stats.deepfilter_latency_ms;
-  }
-  for (const auto& loaded : impl_->plugins) {
-    ++stats.plugins_loaded;
-    double latency_ms = 0.0;
-    if (loaded.vst3 && loaded.vst3 != nullptr) {
-      latency_ms = loaded.vst3->latency_frames() * 1000.0 / impl_->engine_rate;
-    } else if (loaded.vst2 != nullptr) {
-      latency_ms = loaded.vst2->latency_frames() * 1000.0 / impl_->engine_rate;
-    }
-    stats.plugin_latency_ms += latency_ms;
-    stats.latency_ms += latency_ms;
-  }
+  stats.deepfilter_active = impl_->deepfilter_active.load(std::memory_order_relaxed);
+  stats.deepfilter_latency_ms = impl_->deepfilter_latency_ms.load(std::memory_order_relaxed);
+  stats.latency_ms += stats.deepfilter_latency_ms;
+  stats.plugins_loaded = impl_->plugins_loaded.load(std::memory_order_relaxed);
+  stats.plugin_latency_ms = impl_->plugin_latency_ms.load(std::memory_order_relaxed);
+  stats.latency_ms += stats.plugin_latency_ms;
   stats.recoveries = impl_->recoveries.load(std::memory_order_relaxed);
   stats.noise_floor_in_db = impl_->noise_in.floor_db();
   stats.noise_floor_out_db = impl_->noise_out.floor_db();

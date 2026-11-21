@@ -2,7 +2,6 @@
 
 #include <windows.h>
 
-#include <cstddef>
 #include <string>
 
 namespace ui {
@@ -22,7 +21,7 @@ enum class ButtonKind {
 
 // 主窗口全部控件的位置；由 compute_layout 统一计算，避免坐标散落。
 // 客户区固定 300px 宽：默认只显示“开关 + 设备 + 强度 + 高级入口”，
-// advanced=true 时在下方追加场景、插件、参数与声音处理。
+// advanced=true 时在下方追加场景、插件与声音处理。
 struct Layout {
   RECT header;
   RECT power;
@@ -43,10 +42,6 @@ struct Layout {
   RECT plugin_label;
   RECT plugin_slot[3];
 
-  RECT param_label;
-  RECT param_tab[3];
-  POINT param_row_origin;
-
   RECT sound_label;
   RECT gain_label;
   RECT gain_slider;
@@ -60,6 +55,8 @@ struct Layout {
 
   // 常规开关：内置降噪 / 随系统启动 / 启动时最小化
   RECT option[3];
+  // 系统声音面板入口（经典 mmsys.cpl 对话框）
+  RECT system_sound;
 
   RECT footer;
   int client_height = 0;
@@ -89,9 +86,7 @@ COLORREF card_color();
 HBRUSH window_brush();
 COLORREF window_color();
 
-Layout compute_layout(const std::size_t (&rows)[3], const bool (&note)[3],
-                      bool advanced = false);
-int max_param_rows();
+Layout compute_layout(bool advanced = false);
 
 // 页脚展示的版本号（形如 L"v0.1.9"），来源是构建时注入的 MICSTUDIO_VERSION。
 std::wstring version_string();

@@ -35,6 +35,9 @@ class RenderStream {
   platform::Error start(RenderCallback callback);
   void stop();
 
+  // 停止并释放端点（设备归还系统）。之后可再次 open。
+  void close();
+
   const AudioFormat& format() const noexcept;
   std::uint32_t buffer_frames() const noexcept;
   bool running() const noexcept;

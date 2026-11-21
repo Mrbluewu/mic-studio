@@ -2,7 +2,8 @@ configure_file("${CMAKE_SOURCE_DIR}/assets/icons/mic-studio.ico"
   "${CMAKE_CURRENT_BINARY_DIR}/app.ico" COPYONLY)
 configure_file(micstudio.rc.in "${CMAKE_CURRENT_BINARY_DIR}/micstudio.rc" @ONLY)
 
-add_executable(micstudio WIN32 main.cpp ui_theme.cpp ui_controls.cpp
+add_executable(micstudio WIN32
+  main.cpp app_ui.cpp app_plugins.cpp app_window.cpp ui_theme.cpp ui_controls.cpp
   "${CMAKE_CURRENT_BINARY_DIR}/micstudio.rc")
 # 资源脚本生成的 .rc 在构建目录里，resource.h 还在源码目录，两者都要能#include 到。
 target_include_directories(micstudio PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

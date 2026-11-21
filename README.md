@@ -7,7 +7,7 @@ Windows 桌面端实时麦克风降噪工具。自绘 Win32 界面，音频链�
 - 语言标准：C++20
 - 构建：CMake + MSVC（Visual Studio 2022 BuildTools）
 - 平台：Windows 10 / 11（WASAPI）
-- 当前版本：0.1.13
+- 当前版本：由根 [CMakeLists.txt](CMakeLists.txt) 的 `project(VERSION)` 决定，不在文档里重复记录
 
 ## 目录
 
@@ -31,11 +31,14 @@ dist/          安装包产物（不入库）
 | 依赖 | 要求 |
 |---|---|
 | 编译器 | Visual Studio 2022 BuildTools（MSVC，C++20） |
-| 构建工具 | CMake 3.20+ |
+| 构建工具 | CMake 3.24+ |
 | 打包（可选） | Inno Setup 6 |
-| VST3 SDK | **需自行放置**到 `third_party/vst3sdk/`，见下 |
+| VST3 SDK | **需自行放置**到 `third_party/vst3sdk/`，见下；也可用 `-DMS_ENABLE_VST3=OFF` 跳过 |
 
-VST3 SDK 不入库，克隆后必须补齐，否则 `vst3_host` 模块无法编译：
+VST3 SDK 不入库，克隆后默认配置会因缺少 `vst3_host` 源码而失败。两种处理方式：
+
+- **不需要 VST3 宿主**：配置时加 `-DMS_ENABLE_VST3=OFF`，该模块不参与编译，主链路与 VST2 不受影响。
+- **需要 VST3 宿主**：按下述步骤补齐 SDK。
 
 1. 获取 VST3 SDK **3.7.1**（上游 tag `v3.7.1_build_50`）：
    `git clone --recursive --branch v3.7.1_build_50 https://github.com/steinbergmedia/vst3sdk.git`
@@ -52,28 +55,46 @@ $cmake = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7
 
 产物：`build\apps\micstudio\Release\micstudio.exe`
 
+不带 VST3 宿主时：
+
+```powershell
+& $cmake -S . -B build -DMS_ENABLE_VST3=OFF
+& $cmake --build build --config Release
+```
+
 ## 测试
 
 ```powershell
 & build\tests\Release\micstudio_ui_tests.exe
+& build\tests\Release\micstudio_dsp_core_tests.exe
+& build\tests\Release\ms_concurrency_tests.exe
 ```
 
-基线：305 checks，0 failed。界面布局改动会改变高度基线，需同步更新 `tests/ui_tests.cpp`。
+也可用 `ctest --test-dir build -C Release` 一次跑完。
+
+基线：UI 290 checks、DSP core 150 checks、并发测试全过，均 0 failed。界面布局改动会改变高度基线，需同步更新 `tests/ui_tests.cpp`。
 
 ## 打包
 
+ISS 脚本由模板 `packaging/installer.iss.in` 在 CMake 配置阶段生成到 `build\packaging\installer.iss`，版本号自动取 `PROJECT_VERSION`：
+
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" packaging\installer.iss
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" build\packaging\installer.iss
 ```
 
 输出：`dist\MicStudio-Setup-<版本>.exe`
 
+MSVC 运行库为静态链接（`MultiThreaded`），产物不依赖 `vc_redist`，可直接分发。
+
 ## 版本号
 
-版本号有两处，升级时必须同批修改：
+唯一来源是根 [CMakeLists.txt](CMakeLists.txt) 的 `project(mic_studio VERSION x.y.z)`。升级只需改这一处，下列值全部自动派生：
 
-- 根 [CMakeLists.txt](CMakeLists.txt) 的 `project(mic_studio VERSION x.y.z)` —— 决定 exe 资源版本
-- [packaging/installer.iss](packaging/installer.iss) 的 `#define AppVersion` —— 决定安装包文件名
+| 派生位置 | 用途 |
+|---|---|
+| `apps/micstudio/micstudio.rc.in` | exe 属性面板的 FileVersion / ProductVersion |
+| `apps/micstudio/CMakeLists.txt` 的 `MICSTUDIO_VERSION` | 界面页脚显示 |
+| `packaging/installer.iss.in` 的 `{#AppVersion}` | 安装包版本与文件名 |
 
 ## 第三方依赖
 

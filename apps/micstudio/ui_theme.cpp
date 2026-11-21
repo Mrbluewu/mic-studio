@@ -9,8 +9,6 @@
 #include <dwmapi.h>
 #include <uxtheme.h>
 
-#include <algorithm>
-#include <cmath>
 #include <cwchar>
 
 #include "ui_icons.h"
@@ -55,9 +53,14 @@ constexpr int kChipHeight = 26;
 constexpr int kSlotHeight = 28;
 constexpr int kSlotGap = 4;
 constexpr int kDeviceRow = 38;
-constexpr int kParamRow = 26;
 constexpr int kControlRadius = 8;
 constexpr int kPowerDiameter = 104;
+// 主开关区的三处留白：标题下沿 → 圆顶、圆底 → 首行状态文字、状态文字 → 设备行。
+constexpr int kPowerTopGap = 25;
+constexpr int kPowerStatusGap = 4;
+// 两行状态文字：首行 22px + 行间 2px + 次行 16px。
+constexpr int kPowerStatusHeight = 40;
+constexpr int kPowerBottomGap = 23;
 
 ULONG_PTR g_token = 0;
 bool g_ready = false;
@@ -201,7 +204,7 @@ COLORREF card_color() { return kCard; }
 HBRUSH window_brush() { return g_window_brush; }
 COLORREF window_color() { return kAppBg; }
 
-Layout compute_layout(const std::size_t (&rows)[3], const bool (&note)[3], bool advanced) {
+Layout compute_layout(bool advanced) {
   Layout layout{};
   // 窗口固定 300px 宽，布局不随客户区伸缩。
   const int w = kFixedWidth;
@@ -212,34 +215,43 @@ Layout compute_layout(const std::size_t (&rows)[3], const bool (&note)[3], bool 
   layout.header = {left, 14, right, 34};
 
   // 主开关独占上半屏，是整窗唯一的视觉重心。
-  // 高度从 260 收到 232：圆形按钮同时上移，上方空白不再喧宾夺主。
-  layout.power = {left, 44, right, 276};
+  // 圆钮上下留白都压到原来的 1/3：标题下沿到圆顶 25px、圆底到首行文字 4px、
+  // 第二行文字下沿到设备行 23px；其余控件整体上移，整窗高度随之收缩。
   // 只有圆形按钮本身可点击；两行状态文字画在父窗口上，不参与命中测试。
   const int power_cx = (left + right) / 2;
-  const int power_cy = layout.power.top + (layout.power.bottom - layout.power.top) / 2;
+  const int power_cy = layout.header.bottom + kPowerTopGap + kPowerDiameter / 2;
   layout.power_button = {power_cx - kPowerDiameter / 2, power_cy - kPowerDiameter / 2,
                          power_cx + kPowerDiameter / 2, power_cy + kPowerDiameter / 2};
+  // power 只作为圆钮 + 状态文字的失效重绘区，不必铺到设备行。
+  layout.power = {left, layout.header.bottom + 10, right,
+                  layout.power_button.bottom + kPowerStatusGap + kPowerStatusHeight};
 
-  layout.device_input = {left, 284, right, 284 + kDeviceRow};
-  layout.device_output = {left, 328, right, 328 + kDeviceRow};
+  int top = layout.power.bottom + kPowerBottomGap;
+  layout.device_input = {left, top, right, top + kDeviceRow};
+  top += kDeviceRow + 6;
+  layout.device_output = {left, top, right, top + kDeviceRow};
+  top += kDeviceRow + 14;
 
   // 设备区与降噪强度之间留 14px 组间距，和高级区内部的组间距一致。
-  layout.denoise_label = {left, 380, left + 120, 396};
+  layout.denoise_label = {left, top, left + 120, top + 16};
   // 与本区块两个增益数值共用同一列宽，右沿对齐时左沿也齐。
-  layout.denoise_value = {right - 60, 380, right, 396};
-  layout.denoise_slider = {left, 398, right, 418};
+  layout.denoise_value = {right - 60, top, right, top + 16};
+  top += 18;
+  layout.denoise_slider = {left, top, right, top + 20};
   // 滑杆与高级入口之间留出分隔线的呼吸位：上方 8px、下方 6px。
-  layout.advanced_toggle = {left, 434, right, 466};
+  top += 20 + 16;
+  layout.advanced_toggle = {left, top, right, top + 32};
+  top += 32 + 10;
 
-  int top = 476;
   if (!advanced) {
     // 与展开态页脚一致：最后一行到页脚统一 6px。
-    layout.footer = {left, 472, right, 488};
+    layout.footer = {left, layout.advanced_toggle.bottom + 6, right,
+                     layout.advanced_toggle.bottom + 22};
     layout.client_height = layout.footer.bottom + kPad;
     return layout;
   }
 
-  // 高级区：场景 → 插件 → 参数 → 声音处理 → 常规，全部单列堆叠。
+  // 高级区：场景 → 插件 → 声音处理 → 常规，全部单列堆叠。
   // 组内「标题 → 内容」固定 20px，组间统一 kGroupGap，避免各段间距忽大忽小。
   constexpr int kGroupGap = 12;
   layout.scene_label = {left, top, right, top + 14};
@@ -267,21 +279,6 @@ Layout compute_layout(const std::size_t (&rows)[3], const bool (&note)[3], bool 
   }
   // 循环末尾多累加了一次槽间距：退回后按组间距接下一组。
   top += kGroupGap - kSlotGap;
-
-  layout.param_label = {left, top, left + 120, top + 14};
-  for (int tab = 0; tab < 3; ++tab) {
-    const int tab_right = right - (2 - tab) * 48;
-    layout.param_tab[tab] = {tab_right - 44, top - 6, tab_right, top + 20};
-  }
-  // 页签盒比标题行高：底边再留 6px 才接第一行参数，避免两者贴死。
-  top += 26;
-
-  layout.param_row_origin = POINT{left, top};
-  const int row_count =
-      std::max(1, static_cast<int>(std::max({rows[0], rows[1], rows[2]})));
-  const int note_height = (note[0] || note[1] || note[2]) ? 18 : 0;
-  top += row_count * kParamRow + note_height;
-  top += kGroupGap;
 
   layout.sound_label = {left, top, right, top + 14};
   top += 20;
@@ -321,28 +318,12 @@ Layout compute_layout(const std::size_t (&rows)[3], const bool (&note)[3], bool 
   }
   top += kChipHeight + 10;
 
+  layout.system_sound = {left, top, right, top + kChipHeight};
+  top += kChipHeight + 10;
+
   layout.footer = {left, top, right, top + 16};
   layout.client_height = layout.footer.bottom + kPad;
   return layout;
-}
-
-int max_param_rows() {
-  RECT work{};
-  if (::SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0) == FALSE) {
-    return 4;
-  }
-  const int height = work.bottom - work.top;
-  if (height <= 0) {
-    return 4;
-  }
-  // 以“0 行插件参数”的展开态客户区高为基线，再加上标题栏与边框，
-  // 剩余空间才分给额外参数行，避免整窗超出工作区。
-  const std::size_t empty_rows[3] = {0, 0, 0};
-  const bool no_note[3] = {false, false, false};
-  RECT frame{0, 0, kFixedWidth, compute_layout(empty_rows, no_note, true).client_height};
-  ::AdjustWindowRectEx(&frame, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
-  const int window_height = frame.bottom - frame.top;
-  return std::clamp((height - window_height) / kParamRow, 2, 6);
 }
 
 std::wstring version_string() {
@@ -434,7 +415,7 @@ void paint_all(HDC dc, HWND hwnd, const Layout& layout, const HeadState& state) 
   // 主开关下方的两行说明文字画在父窗口上，让圆形按钮成为唯一命中区域。
   {
     // 与圆形按钮的下沿对齐，避免文字压到圆上。
-    const LONG text_top = layout.power_button.bottom + 12;
+    const LONG text_top = layout.power_button.bottom + kPowerStatusGap;
     draw_text(dc, on ? L"降噪已开启" : L"原声直通",
               RECT{layout.power.left, text_top, layout.power.right, text_top + 22}, font_title(),
               on ? kText2 : kAmber, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
@@ -451,8 +432,6 @@ void paint_all(HDC dc, HWND hwnd, const Layout& layout, const HeadState& state) 
     draw_text(dc, L"场景", layout.scene_label, font_small(), kLabel,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     draw_text(dc, L"降噪插件", layout.plugin_label, font_small(), kLabel,
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    draw_text(dc, L"参数", layout.param_label, font_small(), kLabel,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     draw_text(dc, L"声音处理", layout.sound_label, font_small(), kLabel,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE);

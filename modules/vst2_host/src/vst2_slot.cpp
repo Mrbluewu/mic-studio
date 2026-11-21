@@ -159,7 +159,6 @@ platform::Error Vst2Slot::load(const std::wstring& path) {
 
   module_ = module;
   effect_ = effect;
-  num_inputs_ = static_cast<int>(effect->numInputs);
   num_outputs_ = static_cast<int>(effect->numOutputs);
   latency_frames_ = std::max<std::int32_t>(0, effect->initialDelay);
   block_size_ = kProcessBlock;
@@ -280,17 +279,18 @@ void Vst2Slot::set_parameter(int index, float value) {
 }
 
 void Vst2Slot::record_parameter_change(int index, float value) {
-  if (index < 0) {
+  if (index < 0 || effect_ == nullptr || index >= effect_->numParams) {
     return;
   }
-  std::lock_guard<std::mutex> lock(change_mutex_);
-  pending_changes_.push_back({index, std::clamp(value, 0.0f, 1.0f)});
+  pending_changes_.try_push({index, std::clamp(value, 0.0f, 1.0f)});
 }
 
 std::vector<Vst2Slot::ParameterChange> Vst2Slot::take_parameter_changes() {
-  std::lock_guard<std::mutex> lock(change_mutex_);
   std::vector<ParameterChange> result;
-  result.swap(pending_changes_);
+  ParameterChange change;
+  while (pending_changes_.try_pop(change)) {
+    result.push_back(change);
+  }
   return result;
 }
 
@@ -358,9 +358,7 @@ bool Vst2Slot::editor_size(int& width, int& height) const {
 intptr_t Vst2Slot::host_callback(AEffect* effect, std::int32_t opcode, std::int32_t index,
                                  intptr_t value, void* ptr, float opt) {
   auto* self = effect != nullptr ? reinterpret_cast<Vst2Slot*>(effect->reserved1) : nullptr;
-  (void)index;
   (void)value;
-  (void)opt;
 
   switch (opcode) {
     case audioMasterAutomate:
@@ -412,9 +410,8 @@ intptr_t Vst2Slot::host_callback(AEffect* effect, std::int32_t opcode, std::int3
 
 void Vst2Slot::close() {
   close_editor();
-  {
-    std::lock_guard<std::mutex> lock(change_mutex_);
-    pending_changes_.clear();
+  ParameterChange discarded;
+  while (pending_changes_.try_pop(discarded)) {
   }
   if (effect_ != nullptr) {
     effect_->dispatcher(effect_, effClose, 0, 0, nullptr, 0.0f);
@@ -424,7 +421,6 @@ void Vst2Slot::close() {
     ::FreeLibrary(static_cast<HMODULE>(module_));
     module_ = nullptr;
   }
-  num_inputs_ = 0;
   num_outputs_ = 0;
   latency_frames_ = 0;
   in_l_.clear();
